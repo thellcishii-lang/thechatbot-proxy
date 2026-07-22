@@ -41,7 +41,11 @@ exports.handler = async (event) => {
   }
 
   try {
-    const store = getStore("customers");
+    const store = getStore({
+      name: "customers",
+      siteID: process.env.NETLIFY_SITE_ID,
+      token: process.env.NETLIFY_API_TOKEN,
+    });
     const req = JSON.parse(event.body);
 
     // ① 新規顧客の作成
