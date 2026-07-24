@@ -61,6 +61,7 @@ exports.handler = async (event) => {
         id,
         password,
         customerName: req.customerName || "",
+        email: req.email || "",
         status: "setup", // setup(学習中) → ready(公開準備完了) → live(本番稼働)
         systemPrompt: "",
         faqDraft: "",
