@@ -1,10 +1,12 @@
 // netlify/functions/square-webhook.js
 //
 // Squareからの決済完了通知(Webhook)を受け取るための関数です。
-// invoice.payment_made イベントを検知したら、そのお客様に
-// 「契約成立+設定用Zoeのご案内」メールを送信します。
+// invoice.payment_made イベントを検知したら、運営(あなた)宛に
+// 「入金がありました」という通知メールを送信します。
+// (将来的には、この通知内容をもとに設定用Zoeの案内メール送信まで自動化する予定)
 
 const crypto = require("crypto");
+const nodemailer = require("nodemailer");
 
 exports.handler = async (event) => {
   if (event.httpMethod !== "POST") {
@@ -29,8 +31,24 @@ exports.handler = async (event) => {
 
     // ② 支払い完了イベントだけを処理する
     if (payload.type === "invoice.payment_made") {
-      // ここに「契約成立メール送信」の処理を追加していきます(次のステップ)
-      console.log("決済完了を検知:", JSON.stringify(payload.data));
+      const invoice = payload.data.object.invoice;
+      const payerEmail = invoice?.primary_recipient?.email_address || "不明";
+      const amount = invoice?.payment_requests?.[0]?.total_completed_amount_money?.amount || "不明";
+
+      const transporter = nodemailer.createTransport({
+        service: "gmail",
+        auth: {
+          user: process.env.GMAIL_USER,
+          pass: process.env.GMAIL_APP_PASSWORD,
+        },
+      });
+
+      await transporter.sendMail({
+        from: process.env.GMAIL_USER,
+        to: process.env.GMAIL_USER, // 運営(自分)宛
+        subject: "【入金通知】the.chatBOT Zoe の決済がありました",
+        text: `決済完了通知が届きました。\n\n支払者メール: ${payerEmail}\n金額: ${amount}\n\nこの内容をもとに、該当のお客様へ設定用Zoeのご案内を送ってください。`,
+      });
     }
 
     return { statusCode: 200, body: "OK" };
