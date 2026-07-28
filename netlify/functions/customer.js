@@ -9,6 +9,7 @@
 //   action: "login"         → ID+パスワードを照合し、正しければ顧客データを返す
 //   action: "update"        → 顧客データ(学習内容など)を更新保存
 //   action: "check"         → IDが存在するかだけを確認(パスワード不要、production画面用)
+//   action: "findByEmail"   → メールアドレスから該当顧客を検索(決済Webhook用)
 
 const { getStore } = require("@netlify/blobs");
 
@@ -61,7 +62,6 @@ exports.handler = async (event) => {
         id,
         password,
         customerName: req.customerName || "",
-        email: req.email || "",
         email: req.email || "",
         status: "setup", // setup(学習中) → ready(公開準備完了) → live(本番稼働)
         systemPrompt: "",
@@ -120,6 +120,30 @@ exports.handler = async (event) => {
           systemPrompt: record.systemPrompt,
         }),
       };
+    }
+
+    // ⑤ メールアドレスによる検索(決済Webhookが、支払いに使われたメールから該当顧客を探すために使う)
+    if (req.action === "findByEmail") {
+      if (!req.email) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "emailが指定されていません" }) };
+      }
+      const { blobs } = await store.list();
+      for (const blob of blobs) {
+        const record = await store.get(blob.key, { type: "json" });
+        if (record && record.email && record.email.toLowerCase() === req.email.toLowerCase()) {
+          return {
+            statusCode: 200,
+            headers,
+            body: JSON.stringify({
+              id: record.id,
+              customerName: record.customerName,
+              email: record.email,
+              status: record.status,
+            }),
+          };
+        }
+      }
+      return { statusCode: 404, headers, body: JSON.stringify({ error: "該当する顧客が見つかりません" }) };
     }
 
     return { statusCode: 400, headers, body: JSON.stringify({ error: "不明なactionです" }) };
