@@ -18,6 +18,73 @@
 // 画面)は、従来どおり body.system / body.tools をそのまま使う
 // 後方互換モードで動作します。今後、他の画面も順次 mode 対応に
 // 切り替えていく想定です。
+//
+// あわせて、誰でもアクセスできるLP埋め込みという性質上、大量メッセージ
+// 送信によるAPIコスト消費攻撃を防ぐため、同一IPからのリクエストに
+// 簡易レート制限をかけています(5分間に20回まで)。
+
+const { getStore } = require("@netlify/blobs");
+
+function getClientIp(event) {
+  return (
+    event.headers["x-nf-client-connection-ip"] ||
+    (event.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
+    "unknown"
+  );
+}
+
+async function checkRateLimit(ip) {
+  try {
+    const store = getStore({
+      name: "rate-limit-chat",
+      siteID: process.env.NETLIFY_SITE_ID,
+      token: process.env.NETLIFY_API_TOKEN,
+    });
+
+    const SHORT_WINDOW_MS = 5 * 60 * 1000;   // 5分間
+    const SHORT_LIMIT = 20;                  // 5分間に20回まで
+    const DAY_WINDOW_MS = 24 * 60 * 60 * 1000; // 1日
+    const DAY_LIMIT = 50;                    // 1日に50回まで。超えたら永久ブラックリスト入り
+
+    const now = Date.now();
+    const record = (await store.get(ip, { type: "json" })) || {};
+
+    // 一度ブラックリスト入りしたら、期限なくずっと拒否する
+    if (record.blacklisted) {
+      return { allowed: false, reason: "blacklisted" };
+    }
+
+    // 5分間の短期カウンター
+    let shortStart = record.shortStart || now;
+    let shortCount = record.shortCount || 0;
+    if (now - shortStart > SHORT_WINDOW_MS) {
+      shortStart = now;
+      shortCount = 0;
+    }
+    shortCount++;
+
+    // 1日の長期カウンター
+    let dayStart = record.dayStart || now;
+    let dayCount = record.dayCount || 0;
+    if (now - dayStart > DAY_WINDOW_MS) {
+      dayStart = now;
+      dayCount = 0;
+    }
+    dayCount++;
+
+    // 1日50回を超えたら、恒久的にブラックリスト入り
+    const blacklisted = dayCount > DAY_LIMIT;
+
+    await store.setJSON(ip, { shortStart, shortCount, dayStart, dayCount, blacklisted });
+
+    if (blacklisted) return { allowed: false, reason: "blacklisted" };
+    if (shortCount > SHORT_LIMIT) return { allowed: false, reason: "rate_limited" };
+
+    return { allowed: true };
+  } catch (e) {
+    return { allowed: true }; // 判定自体が失敗しても本来の機能は止めない
+  }
+}
 
 const SALES_SYSTEM_PROMPT = `あなたは「Zoe(ゾーイ)」という、the.chatBOTが開発した対話型AIです。親しみやすく、簡潔に、日本語で会話してください。
 
@@ -267,6 +334,24 @@ exports.handler = async (event) => {
       body: JSON.stringify({ error: "POSTのみ対応しています" }),
     };
   }
+
+  const clientIp = getClientIp(event);
+  const rateLimitResult = await checkRateLimit(clientIp);
+  if (!rateLimitResult.allowed) {
+    if (rateLimitResult.reason === "blacklisted") {
+      return {
+        statusCode: 403,
+        headers,
+        body: JSON.stringify({ error: "このIPアドレスは、不審なアクセスが検知されたため利用を制限しています。" }),
+      };
+    }
+    return {
+      statusCode: 429,
+      headers,
+      body: JSON.stringify({ error: "リクエストが多すぎます。しばらくしてから再度お試しください。" }),
+    };
+  }
+
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
