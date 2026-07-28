@@ -9,6 +9,10 @@
 // action:
 //   "save"   → 会話を保存(company, person, firstTopic, history を渡す。既存があれば上書き更新)
 //   "lookup" → company + person が一致するか確認し、あれば firstTopic を返す(本人確認用の相槌に使う)
+//
+// セキュリティ対策(2026年7月29日追加):
+// 会社名+担当者名の組み合わせを総当たりされると、他社の過去の相談内容が
+// 漏れてしまう可能性があるため、同一IPからのレート制限を追加しています。
 
 const { getStore } = require("@netlify/blobs");
 
@@ -18,6 +22,37 @@ function makeKey(company, person){
   return norm(company) + "::" + norm(person);
 }
 
+function getClientIp(event) {
+  return (
+    event.headers["x-nf-client-connection-ip"] ||
+    (event.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
+    "unknown"
+  );
+}
+
+async function checkRateLimit(ip) {
+  try {
+    const store = getStore({
+      name: "rate-limit-recall",
+      siteID: process.env.NETLIFY_SITE_ID,
+      token: process.env.NETLIFY_API_TOKEN,
+    });
+    const WINDOW_MS = 5 * 60 * 1000;
+    const LIMIT = 20;
+    const now = Date.now();
+    const record = await store.get(ip, { type: "json" });
+    if (!record || now - record.windowStart > WINDOW_MS) {
+      await store.setJSON(ip, { windowStart: now, count: 1 });
+      return true;
+    }
+    if (record.count >= LIMIT) return false;
+    await store.setJSON(ip, { windowStart: record.windowStart, count: record.count + 1 });
+    return true;
+  } catch (e) {
+    return true;
+  }
+}
+
 exports.handler = async (event) => {
   const headers = {
     "Access-Control-Allow-Origin": "*",
@@ -25,12 +60,17 @@ exports.handler = async (event) => {
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Content-Type": "application/json",
   };
-
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 200, headers, body: "" };
   }
   if (event.httpMethod !== "POST") {
     return { statusCode: 405, headers, body: JSON.stringify({ error: "POSTのみ対応しています" }) };
+  }
+
+  const clientIp = getClientIp(event);
+  const withinLimit = await checkRateLimit(clientIp);
+  if (!withinLimit) {
+    return { statusCode: 429, headers, body: JSON.stringify({ error: "リクエストが多すぎます。しばらくしてから再度お試しください。" }) };
   }
 
   try {
@@ -40,7 +80,6 @@ exports.handler = async (event) => {
       token: process.env.NETLIFY_API_TOKEN,
     });
     const req = JSON.parse(event.body);
-
     if (!req.company || !req.person) {
       return {
         statusCode: 400,
@@ -48,9 +87,7 @@ exports.handler = async (event) => {
         body: JSON.stringify({ error: "companyとpersonは必須です(名前だけの場合は記憶対象外)" }),
       };
     }
-
     const key = makeKey(req.company, req.person);
-
     if (req.action === "save") {
       const record = {
         company: req.company,
@@ -61,7 +98,6 @@ exports.handler = async (event) => {
       await store.setJSON(key, record);
       return { statusCode: 200, headers, body: JSON.stringify({ saved: true }) };
     }
-
     if (req.action === "lookup") {
       const record = await store.get(key, { type: "json" });
       if (!record) {
@@ -69,7 +105,6 @@ exports.handler = async (event) => {
       }
       return { statusCode: 200, headers, body: JSON.stringify({ found: true, record }) };
     }
-
     return { statusCode: 400, headers, body: JSON.stringify({ error: "不明なactionです" }) };
   } catch (err) {
     return { statusCode: 500, headers, body: JSON.stringify({ error: "内部エラー: " + err.message }) };
