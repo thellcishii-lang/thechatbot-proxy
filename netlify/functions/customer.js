@@ -26,6 +26,42 @@ function generatePassword() {
   return pw;
 }
 
+function getClientIp(event) {
+  return (
+    event.headers["x-nf-client-connection-ip"] ||
+    (event.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
+    "unknown"
+  );
+}
+
+// 同一IPからの短時間の大量アクセス(6桁IDの総当たり等)を防ぐための簡易レート制限。
+// 5分間に30回まで。Netlify Blobsにカウンターを保存して判定する。
+async function checkRateLimit(ip) {
+  try {
+    const store = getStore({
+      name: "rate-limit-customer",
+      siteID: process.env.NETLIFY_SITE_ID,
+      token: process.env.NETLIFY_API_TOKEN,
+    });
+    const WINDOW_MS = 5 * 60 * 1000;
+    const LIMIT = 30;
+    const now = Date.now();
+    const record = await store.get(ip, { type: "json" });
+    if (!record || now - record.windowStart > WINDOW_MS) {
+      await store.setJSON(ip, { windowStart: now, count: 1 });
+      return true;
+    }
+    if (record.count >= LIMIT) {
+      return false;
+    }
+    await store.setJSON(ip, { windowStart: record.windowStart, count: record.count + 1 });
+    return true;
+  } catch (e) {
+    // レート制限の判定自体が失敗しても、本来の機能は止めない
+    return true;
+  }
+}
+
 exports.handler = async (event) => {
   const headers = {
     "Access-Control-Allow-Origin": "*",
@@ -39,6 +75,12 @@ exports.handler = async (event) => {
   }
   if (event.httpMethod !== "POST") {
     return { statusCode: 405, headers, body: JSON.stringify({ error: "POSTのみ対応しています" }) };
+  }
+
+  const clientIp = getClientIp(event);
+  const withinLimit = await checkRateLimit(clientIp);
+  if (!withinLimit) {
+    return { statusCode: 429, headers, body: JSON.stringify({ error: "リクエストが多すぎます。しばらくしてから再度お試しください。" }) };
   }
 
   try {
@@ -205,6 +247,11 @@ exports.handler = async (event) => {
 
     // ⑦ 支払い確認済みフラグを立てる(square-webhook.jsが決済完了時に呼ぶ。パスワード不要の内部専用アクション)
     if (req.action === "markPaid") {
+      // 内部専用アクション:合言葉(INTERNAL_FUNCTION_SECRET)が一致しない限り実行不可にする。
+      // これがないと、6桁IDさえ分かれば誰でも「支払い済み」を偽装できてしまうため。
+      if (!process.env.INTERNAL_FUNCTION_SECRET || req.secret !== process.env.INTERNAL_FUNCTION_SECRET) {
+        return { statusCode: 401, headers, body: JSON.stringify({ error: "許可されていません" }) };
+      }
       if (!req.id) {
         return { statusCode: 400, headers, body: JSON.stringify({ error: "idが指定されていません" }) };
       }
