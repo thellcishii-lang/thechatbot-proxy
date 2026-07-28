@@ -86,7 +86,7 @@ exports.handler = async (event) => {
           await fetch("https://chatbot-proxy.netlify.app/.netlify/functions/customer", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "markPaid", id: customer.id }),
+            body: JSON.stringify({ action: "markPaid", id: customer.id, secret: process.env.INTERNAL_FUNCTION_SECRET }),
           });
 
           // ④ 一致した場合:お客様へ設定用Zoeの案内メールを自動送信
