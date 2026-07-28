@@ -9,6 +9,38 @@ const {
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
   WidthType, ShadingType, BorderStyle, AlignmentType, VerticalAlign,
 } = require("docx");
+const { getStore } = require("@netlify/blobs");
+
+function getClientIp(event) {
+  return (
+    event.headers["x-nf-client-connection-ip"] ||
+    (event.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
+    "unknown"
+  );
+}
+
+async function checkRateLimit(ip) {
+  try {
+    const store = getStore({
+      name: "rate-limit-generate-application",
+      siteID: process.env.NETLIFY_SITE_ID,
+      token: process.env.NETLIFY_API_TOKEN,
+    });
+    const WINDOW_MS = 5 * 60 * 1000;
+    const LIMIT = 15;
+    const now = Date.now();
+    const record = await store.get(ip, { type: "json" });
+    if (!record || now - record.windowStart > WINDOW_MS) {
+      await store.setJSON(ip, { windowStart: now, count: 1 });
+      return true;
+    }
+    if (record.count >= LIMIT) return false;
+    await store.setJSON(ip, { windowStart: record.windowStart, count: record.count + 1 });
+    return true;
+  } catch (e) {
+    return true;
+  }
+}
 
 const AMBER = "C9750A";
 const DARKGRAY = "333333";
@@ -159,6 +191,12 @@ exports.handler = async (event) => {
   }
   if (event.httpMethod !== "POST") {
     return { statusCode: 405, headers, body: JSON.stringify({ error: "POSTのみ対応しています" }) };
+  }
+
+  const clientIp = getClientIp(event);
+  const withinLimit = await checkRateLimit(clientIp);
+  if (!withinLimit) {
+    return { statusCode: 429, headers, body: JSON.stringify({ error: "リクエストが多すぎます。しばらくしてから再度お試しください。" }) };
   }
 
   try {
