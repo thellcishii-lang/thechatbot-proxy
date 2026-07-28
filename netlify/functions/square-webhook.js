@@ -5,9 +5,13 @@
 // 支払いに使われたメールアドレスでcustomer.jsを検索し、
 // 該当する顧客が見つかれば、設定用Zoeの案内メールを自動送信します。
 // (見つからない/一致しない場合は、運営宛に確認依頼メールを送ります)
+//
+// Squareは同じ決済に対して複数回Webhookを送ってくることがあるため、
+// Netlify Blobsに「処理済みのpayment.id」を記録し、二重処理を防ぎます。
 
 const crypto = require("crypto");
 const nodemailer = require("nodemailer");
+const { getStore } = require("@netlify/blobs");
 
 function getTransporter() {
   return nodemailer.createTransport({
@@ -49,13 +53,26 @@ exports.handler = async (event) => {
     }
 
     const payload = JSON.parse(body);
-    const transporter = getTransporter();
 
     // ② 決済完了イベントだけを処理する
     if (payload.type === "payment.updated") {
       const payment = payload.data.object.payment;
 
       if (payment.status === "COMPLETED") {
+        // ③ 重複処理防止:同じpayment.idを既に処理済みなら何もしない
+        const processedStore = getStore({
+          name: "processed-payments",
+          siteID: process.env.NETLIFY_SITE_ID,
+          token: process.env.NETLIFY_API_TOKEN,
+        });
+        const alreadyProcessed = await processedStore.get(payment.id);
+        if (alreadyProcessed) {
+          return { statusCode: 200, body: "既に処理済みのためスキップしました" };
+        }
+        // 先に「処理済み」の印を記録してから、後続の処理に入る
+        await processedStore.set(payment.id, new Date().toISOString());
+
+        const transporter = getTransporter();
         const buyerEmail = payment.buyer_email_address || null;
         const amount = payment.amount_money ? payment.amount_money.amount : "不明";
 
@@ -65,7 +82,7 @@ exports.handler = async (event) => {
         }
 
         if (customer && customer.id) {
-          // ③ 一致した場合:お客様へ設定用Zoeの案内メールを自動送信
+          // ④ 一致した場合:お客様へ設定用Zoeの案内メールを自動送信
           await transporter.sendMail({
             from: process.env.GMAIL_USER,
             to: customer.email,
@@ -89,7 +106,7 @@ exports.handler = async (event) => {
             text: `${customer.customerName}様(ID: ${customer.id})への設定用Zoe案内メールを自動送信しました。\n支払者メール: ${buyerEmail}\n金額: ${amount}`,
           });
         } else {
-          // ④ 一致しなかった場合:運営宛に確認依頼メールを送る
+          // ⑤ 一致しなかった場合:運営宛に確認依頼メールを送る
           await transporter.sendMail({
             from: process.env.GMAIL_USER,
             to: process.env.GMAIL_USER,
