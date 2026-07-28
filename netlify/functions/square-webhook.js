@@ -82,6 +82,13 @@ exports.handler = async (event) => {
         }
 
         if (customer && customer.id) {
+          // ③.5 支払い済みフラグを立てる(1週間期限切れチェックの対象から外すため)
+          await fetch("https://chatbot-proxy.netlify.app/.netlify/functions/customer", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "markPaid", id: customer.id }),
+          });
+
           // ④ 一致した場合:お客様へ設定用Zoeの案内メールを自動送信
           await transporter.sendMail({
             from: process.env.GMAIL_USER,
