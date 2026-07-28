@@ -3,6 +3,59 @@
 // お客様が伝えた会社URLが実在するか、また、そのページの中に
 // お客様が名乗った会社名が含まれているかを確認するための関数です。
 // 完全な照合ではなく、明らかな入力ミス・無関係なURLを弾くための簡易チェックです。
+//
+// セキュリティ対策(2026年7月29日追加):
+// この関数は「指定されたURLの代わりにアクセスしてあげる」という性質上、
+// 悪用されると社内ネットワークやクラウドの内部情報(メタデータAPI等)への
+// 攻撃の踏み台にされるリスクがあるため、①同一IPからのレート制限、
+// ②localhost・プライベートIP・クラウドメタデータアドレス宛のリクエストを
+// 拒否するチェック、の2つを追加しています。
+
+const { getStore } = require("@netlify/blobs");
+const dns = require("dns").promises;
+
+function getClientIp(event) {
+  return (
+    event.headers["x-nf-client-connection-ip"] ||
+    (event.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
+    "unknown"
+  );
+}
+
+async function checkRateLimit(ip) {
+  try {
+    const store = getStore({
+      name: "rate-limit-verify-url",
+      siteID: process.env.NETLIFY_SITE_ID,
+      token: process.env.NETLIFY_API_TOKEN,
+    });
+    const WINDOW_MS = 5 * 60 * 1000;
+    const LIMIT = 20;
+    const now = Date.now();
+    const record = await store.get(ip, { type: "json" });
+    if (!record || now - record.windowStart > WINDOW_MS) {
+      await store.setJSON(ip, { windowStart: now, count: 1 });
+      return true;
+    }
+    if (record.count >= LIMIT) return false;
+    await store.setJSON(ip, { windowStart: record.windowStart, count: record.count + 1 });
+    return true;
+  } catch (e) {
+    return true;
+  }
+}
+
+function isPrivateIp(ip) {
+  // IPv4のプライベート・ループバック・リンクローカル(クラウドのメタデータAPIを含む)を弾く
+  if (/^127\./.test(ip)) return true;
+  if (/^10\./.test(ip)) return true;
+  if (/^192\.168\./.test(ip)) return true;
+  if (/^169\.254\./.test(ip)) return true; // 169.254.169.254 等のメタデータAPIを含む
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)) return true;
+  if (ip === "::1") return true;
+  if (/^f[cd]/i.test(ip)) return true; // IPv6のユニークローカルアドレス
+  return false;
+}
 
 exports.handler = async (event) => {
   const headers = {
@@ -19,6 +72,12 @@ exports.handler = async (event) => {
     return { statusCode: 405, headers, body: JSON.stringify({ error: "POSTのみ対応しています" }) };
   }
 
+  const clientIp = getClientIp(event);
+  const withinLimit = await checkRateLimit(clientIp);
+  if (!withinLimit) {
+    return { statusCode: 429, headers, body: JSON.stringify({ error: "リクエストが多すぎます。しばらくしてから再度お試しください。" }) };
+  }
+
   try {
     const req = JSON.parse(event.body);
     let url = (req.url || "").trim();
@@ -29,6 +88,26 @@ exports.handler = async (event) => {
     }
     if (!/^https?:\/\//i.test(url)) {
       url = "https://" + url;
+    }
+
+    // SSRF対策:接続先ホスト名の実際のIPアドレスを解決し、社内・内部向けアドレスなら拒否する
+    let hostname;
+    try {
+      hostname = new URL(url).hostname;
+    } catch (e) {
+      return { statusCode: 200, headers, body: JSON.stringify({ exists: false, nameMatch: false, reason: "URLの形式が不正です" }) };
+    }
+    if (hostname === "localhost") {
+      return { statusCode: 200, headers, body: JSON.stringify({ exists: false, nameMatch: false, reason: "このホストへはアクセスできません" }) };
+    }
+    try {
+      const { address } = await dns.lookup(hostname);
+      if (isPrivateIp(address)) {
+        return { statusCode: 200, headers, body: JSON.stringify({ exists: false, nameMatch: false, reason: "このホストへはアクセスできません" }) };
+      }
+    } catch (e) {
+      // 名前解決に失敗した場合はexists:falseとして扱う(実在しないURLとして処理する)
+      return { statusCode: 200, headers, body: JSON.stringify({ exists: false, nameMatch: false, reason: "名前解決に失敗しました" }) };
     }
 
     const controller = new AbortController();
@@ -75,4 +154,5 @@ exports.handler = async (event) => {
     return { statusCode: 200, headers, body: JSON.stringify({ exists: false, nameMatch: null, error: err.message }) };
   }
 };
+
 
