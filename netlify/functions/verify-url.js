@@ -1,8 +1,8 @@
 // netlify/functions/verify-url.js
 //
-// お客様が伝えた会社URLが実在するかを確認するための関数です。
-// HEADリクエスト(失敗時はGET)を送り、応答があるかどうかだけを判定します。
-// 中身の正しさまでは保証しません(あくまで「存在するかどうか」の確認)。
+// お客様が伝えた会社URLが実在するか、また、そのページの中に
+// お客様が名乗った会社名が含まれているかを確認するための関数です。
+// 完全な照合ではなく、明らかな入力ミス・無関係なURLを弾くための簡易チェックです。
 
 exports.handler = async (event) => {
   const headers = {
@@ -22,43 +22,57 @@ exports.handler = async (event) => {
   try {
     const req = JSON.parse(event.body);
     let url = (req.url || "").trim();
+    const customerName = (req.customerName || "").trim();
+
     if (!url) {
-      return { statusCode: 200, headers, body: JSON.stringify({ exists: false, reason: "URL未入力" }) };
+      return { statusCode: 200, headers, body: JSON.stringify({ exists: false, nameMatch: false, reason: "URL未入力" }) };
     }
     if (!/^https?:\/\//i.test(url)) {
       url = "https://" + url;
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
+    const timeout = setTimeout(() => controller.abort(), 6000);
 
-    async function tryFetch(method) {
+    let exists = false;
+    let pageText = "";
+    try {
       const res = await fetch(url, {
-        method,
+        method: "GET",
         redirect: "follow",
         signal: controller.signal,
         headers: { "User-Agent": "Mozilla/5.0 (compatible; the.chatBOT-URLCheck/1.0)" },
       });
-      return res;
-    }
-
-    let ok = false;
-    try {
-      const res = await tryFetch("HEAD");
-      ok = res.status < 500; // 404等でもドメイン自体は生きている場合があるため、まずは緩めに判定
-    } catch (e) {
-      try {
-        const res = await tryFetch("GET");
-        ok = res.status < 500;
-      } catch (e2) {
-        ok = false;
+      exists = res.status < 500;
+      if (exists) {
+        const html = await res.text();
+        // タグを乱暴に取り除いて、テキスト照合用の生テキストだけを残す
+        pageText = html.replace(/<script[\s\S]*?<\/script>/gi, "")
+                        .replace(/<style[\s\S]*?<\/style>/gi, "")
+                        .replace(/<[^>]+>/g, " ")
+                        .replace(/\s+/g, "");
       }
+    } catch (e) {
+      exists = false;
     } finally {
       clearTimeout(timeout);
     }
 
-    return { statusCode: 200, headers, body: JSON.stringify({ exists: ok, checkedUrl: url }) };
+    let nameMatch = null; // null = 判定不能(会社名未指定 or 取得失敗)
+    if (exists && customerName) {
+      // 会社名の代表的な表記ゆれ(株式会社の有無、法人格の位置)を軽くカバーする
+      const normalized = customerName.replace(/株式会社|有限会社|合同会社|\(株\)|㈱/g, "").trim();
+      const candidates = [customerName, normalized].filter(Boolean);
+      nameMatch = candidates.some((c) => c && pageText.includes(c));
+    }
+
+    return {
+      statusCode: 200,
+      headers,
+      body: JSON.stringify({ exists, nameMatch, checkedUrl: url }),
+    };
   } catch (err) {
-    return { statusCode: 200, headers, body: JSON.stringify({ exists: false, error: err.message }) };
+    return { statusCode: 200, headers, body: JSON.stringify({ exists: false, nameMatch: null, error: err.message }) };
   }
 };
+
