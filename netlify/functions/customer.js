@@ -203,6 +203,20 @@ exports.handler = async (event) => {
       return { statusCode: 200, headers, body: JSON.stringify({ id, created: true }) };
     }
 
+    // ⑦ 支払い確認済みフラグを立てる(square-webhook.jsが決済完了時に呼ぶ。パスワード不要の内部専用アクション)
+    if (req.action === "markPaid") {
+      if (!req.id) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "idが指定されていません" }) };
+      }
+      const record = await store.get(req.id, { type: "json" });
+      if (!record) {
+        return { statusCode: 404, headers, body: JSON.stringify({ error: "そのIDは存在しません" }) };
+      }
+      const updated = { ...record, paid: true, paidAt: new Date().toISOString() };
+      await store.setJSON(req.id, updated);
+      return { statusCode: 200, headers, body: JSON.stringify({ id: req.id, paid: true }) };
+    }
+
     return { statusCode: 400, headers, body: JSON.stringify({ error: "不明なactionです" }) };
   } catch (err) {
     return { statusCode: 500, headers, body: JSON.stringify({ error: "内部エラー: " + err.message }) };
