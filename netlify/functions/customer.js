@@ -62,7 +62,11 @@ exports.handler = async (event) => {
         id,
         password,
         customerName: req.customerName || "",
+        contactPerson: req.contactPerson || "",
+        address: req.address || "",
         email: req.email || "",
+        companyUrl: req.companyUrl || "",
+        stage: req.stage || "closing", // "lead"(資料請求・未成約の記録) / "closing"(導入申込み)
         status: "setup", // setup(学習中) → ready(公開準備完了) → live(本番稼働)
         systemPrompt: "",
         faqDraft: "",
@@ -144,6 +148,59 @@ exports.handler = async (event) => {
         }
       }
       return { statusCode: 404, headers, body: JSON.stringify({ error: "該当する顧客が見つかりません" }) };
+    }
+
+    // ⑥ 資料請求などの「見込み客」記録。メールアドレスが一致する既存レコードがあれば更新、
+    //   なければ新規に6桁IDを発行して作成する(パスワード確認は不要、社内管理用の記録のため)
+    if (req.action === "upsertLead") {
+      if (!req.email) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "emailが指定されていません" }) };
+      }
+      const { blobs } = await store.list();
+      let existingKey = null;
+      for (const blob of blobs) {
+        const record = await store.get(blob.key, { type: "json" });
+        if (record && record.email && record.email.toLowerCase() === req.email.toLowerCase()) {
+          existingKey = blob.key;
+          break;
+        }
+      }
+
+      if (existingKey) {
+        const record = await store.get(existingKey, { type: "json" });
+        const updated = {
+          ...record,
+          customerName: req.customerName || record.customerName,
+          contactPerson: req.contactPerson || record.contactPerson,
+          phone: req.phone || record.phone,
+          companyUrl: req.companyUrl || record.companyUrl,
+          updatedAt: new Date().toISOString(),
+        };
+        await store.setJSON(existingKey, updated);
+        return { statusCode: 200, headers, body: JSON.stringify({ id: updated.id, updated: true }) };
+      }
+
+      let id;
+      do {
+        id = generateId();
+      } while (await store.get(id));
+      const password = generatePassword();
+      const record = {
+        id,
+        password,
+        customerName: req.customerName || "",
+        contactPerson: req.contactPerson || "",
+        phone: req.phone || "",
+        email: req.email || "",
+        companyUrl: req.companyUrl || "",
+        stage: "lead",
+        status: "setup",
+        systemPrompt: "",
+        faqDraft: "",
+        createdAt: new Date().toISOString(),
+      };
+      await store.setJSON(id, record);
+      return { statusCode: 200, headers, body: JSON.stringify({ id, created: true }) };
     }
 
     return { statusCode: 400, headers, body: JSON.stringify({ error: "不明なactionです" }) };
