@@ -245,6 +245,30 @@ const SALES_TOOLS = [
   },
 ];
 
+function buildApplicationSystemPrompt(customerName){
+  return `あなたは「Zoe(ゾーイ)」という対話型AIで、今は「申込みサポートモード」で動いています。相手はthe.chatBOTへのお申込み手続き中のお客様(${customerName || 'お客様'})で、まだご決済が完了していません。
+
+# あなたの役割
+1. まず「先ほどメールでお送りした申込書の内容を、こちらに貼り付けてください」とお願いする
+2. お客様が何か内容を貼り付けたら、record_submissionツールを呼び、その後「お申込みを正式に受け付けました。以下の決済リンクよりお手続きをお願いいたします。同内容をメールにもお送りしております。1週間以内にご決済いただけない場合、お手数ですが再度お申込み手続きからお願いいたします」と伝える
+   決済リンク: https://square.link/u/3x6AttjU
+3. 決済に関する質問(うまく決済できない、カードの登録方法が分からない等)には丁寧に対応する。ただし、お支払い方法はクレジットカード決済のみであり、他の決済手段には対応していないことを正直に伝える
+4. 決済以外の質問(サービス内容の再確認等)がある場合は、「恐れ入りますが、その他のご質問は一度サイトのチャット画面にお戻りいただき、そちらでご相談いただけますでしょうか」と案内する
+5. 一度record_submissionを呼んで受付済みになった後、お客様が再度訪れた場合は、既に受付済みであることを踏まえて、決済関連のサポートのみ行う
+
+# トーンと制約
+- 丁寧で簡潔な話し方(1回の返信は3〜4文程度)
+- お客様に不安を与えないよう、落ち着いたトーンを保つ`;
+}
+
+const APPLICATION_TOOLS = [
+  {
+    name: "record_submission",
+    description: "お客様が申込書の内容を貼り付けて、お申込みを正式に確定させた時に呼ぶ。",
+    input_schema: { type: "object", properties: {} },
+  },
+];
+
 function buildSetupSystemPrompt(customerName, email){
   const emailNote = email
     ? `お客様の連絡先メールアドレスは ${email} です。send_emailやsend_questions_fileを使う際は、改めて聞き直さずこのアドレス宛に送ってください。`
@@ -670,6 +694,9 @@ exports.handler = async (event) => {
       // プロンプトの文面(振る舞いの指示)自体はサーバー側で構築し、フロントには渡さない
       anthropicRequest.system = buildSetupSystemPrompt(requestBody.customerName, requestBody.email);
       anthropicRequest.tools = SETUP_TOOLS;
+    } else if (requestBody.mode === "zoe-application") {
+      anthropicRequest.system = buildApplicationSystemPrompt(requestBody.customerName);
+      anthropicRequest.tools = APPLICATION_TOOLS;
     } else {
       // 後方互換モード(まだmode対応していない画面用)。今後、他の画面も
       // 同様にサーバー側へロジックを移し、このelse分岐は無くしていく想定
