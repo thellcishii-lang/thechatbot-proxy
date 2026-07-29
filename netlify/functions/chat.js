@@ -361,6 +361,12 @@ const SECRETARY_SYSTEM_PROMPT = `あなたは「秘書Zoe」です。the合同�
 7. 「お客様一覧」「6桁IDを取った人の一覧」のように言われたら、list_customersツールで全顧客(会社名・ステータス・支払い状況等)の一覧を取得して分かりやすく伝える
 8. 「アクセス数」「チャットに入ってきた数」「今日の実績」のように言われたら、get_analyticsツールで指定されたbotId(未指定ならZoe001)・日付(未指定なら今日)のサイトアクセス数・チャット開始数を取得して伝える
 9. 運営者がコード側の初期設定を直接更新した後、「Zoe001をリセットして」のように言われたら、reset_bot_configツールで保存済みの設定を削除し、コード側の最新デフォルトに戻す
+10. 「(6桁ID)を削除して」と言われたら、必ず「本当に削除してよろしいですか?元に戻せません」と一度確認してから、delete_customerツールで削除する
+11. 「お客様リストをリセットして」「全部削除して」のように言われたら、必ず「登録済みの全顧客データを削除しますが、本当によろしいですか?元に戻せません」と明確に確認し、同意が得られてからreset_customer_listツールを使う
+12. web_searchツールで、外部サイトの情報を調べることができる。競合調査や最新情報の確認等に使ってよい
+13. 画像やPDFが送られてきた場合、その内容を読み取って回答に活かす
+14. お客様一覧やアクセス数などのデータを見せる時は、読みやすいMarkdownの表(| 列 | 列 |の形式)で出すこと。生のJSONをそのまま貼り付けない
+15. code_executionツールで、集計・計算・簡単なデータ処理をその場で行える
 
 # トーンと制約
 - 簡潔で、業務的だが丁寧な話し方
@@ -461,6 +467,20 @@ const SECRETARY_TOOLS = [
       required: ["botId"],
     },
   },
+  {
+    name: "delete_customer",
+    description: "指定した6桁IDの顧客データを1件削除する。テストデータの整理等に使う。破壊的な操作なので、必ず運営者に確認を取ってから使うこと。",
+    input_schema: {
+      type: "object",
+      properties: { id: { type: "string", description: "削除する6桁ID" } },
+      required: ["id"],
+    },
+  },
+  {
+    name: "reset_customer_list",
+    description: "登録済みの全顧客データを一括削除する(テストデータの全リセット用)。非常に破壊的な操作なので、「本当に全部削除して良いですか?」と必ず明確な確認を取ってから使うこと。",
+    input_schema: { type: "object", properties: {} },
+  },
 ];
 
 async function callBotConfig(body) {
@@ -554,6 +574,14 @@ async function executeSecretaryTool(name, input) {
       const data = await callBotConfig({ action: "reset", botId: input.botId });
       return data.reset ? `${input.botId} をコード側の最新デフォルト設定に戻しました。` : "リセットに失敗しました: " + (data.error || "不明なエラー");
     }
+    if (name === "delete_customer") {
+      const data = await callCustomerAdmin({ action: "adminDelete", id: input.id });
+      return data.deleted ? `ID ${data.id} を削除しました。` : "削除に失敗しました: " + (data.error || "不明なエラー");
+    }
+    if (name === "reset_customer_list") {
+      const data = await callCustomerAdmin({ action: "adminDeleteAll", confirm: true });
+      return data.deleted ? `${data.count}件の顧客データをすべて削除しました。` : "削除に失敗しました: " + (data.error || "不明なエラー");
+    }
     return "不明なツールです";
   } catch (e) {
     return "ツール実行中にエラーが発生しました: " + e.message;
@@ -576,9 +604,28 @@ async function isValidAdminSession(sessionToken) {
   }
 }
 
+function extractImages(contentArray) {
+  // コード実行の結果などに含まれるbase64画像を、階層を問わず再帰的に探して集める
+  const images = [];
+  function walk(node) {
+    if (!node || typeof node !== "object") return;
+    if (node.type === "image" && node.source && node.source.type === "base64" && node.source.data) {
+      images.push({ mediaType: node.source.media_type || "image/png", data: node.source.data });
+    }
+    for (const key of Object.keys(node)) {
+      const val = node[key];
+      if (Array.isArray(val)) val.forEach(walk);
+      else if (val && typeof val === "object") walk(val);
+    }
+  }
+  (contentArray || []).forEach(walk);
+  return images;
+}
+
 async function runSecretaryAgent(messages) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   let currentMessages = messages.slice();
+  const collectedImages = [];
 
   for (let i = 0; i < 8; i++) { // 無限ループ防止のため上限を設ける
     const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -593,11 +640,18 @@ async function runSecretaryAgent(messages) {
         max_tokens: 1500,
         system: SECRETARY_SYSTEM_PROMPT,
         messages: currentMessages,
-        tools: SECRETARY_TOOLS,
+        tools: [
+          ...SECRETARY_TOOLS,
+          { type: "web_search_20260209", name: "web_search" },
+          { type: "web_fetch_20260209", name: "web_fetch" },
+          { type: "code_execution_20260120", name: "code_execution" },
+        ],
       }),
     });
     const data = await response.json();
-    if (data.error) return "エラーが発生しました: " + JSON.stringify(data.error);
+    if (data.error) return { text: "エラーが発生しました: " + JSON.stringify(data.error), images: [] };
+
+    collectedImages.push(...extractImages(data.content));
 
     const toolUseBlocks = (data.content || []).filter((b) => b.type === "tool_use");
     if (toolUseBlocks.length > 0) {
@@ -614,9 +668,9 @@ async function runSecretaryAgent(messages) {
     }
 
     const textBlock = (data.content || []).find((b) => b.type === "text");
-    return textBlock ? textBlock.text : "(応答の取得に失敗しました)";
+    return { text: textBlock ? textBlock.text : "(応答の取得に失敗しました)", images: collectedImages };
   }
-  return "処理が複雑すぎたため、途中で打ち切りました。もう一度お試しください。";
+  return { text: "処理が複雑すぎたため、途中で打ち切りました。もう一度お試しください。", images: collectedImages };
 }
 
 exports.handler = async (event) => {
@@ -672,8 +726,8 @@ exports.handler = async (event) => {
       if (!valid) {
         return { statusCode: 401, headers, body: JSON.stringify({ error: "セッションが無効です。再度ログインしてください。" }) };
       }
-      const reply = await runSecretaryAgent(requestBody.messages || []);
-      return { statusCode: 200, headers, body: JSON.stringify({ reply }) };
+      const result = await runSecretaryAgent(requestBody.messages || []);
+      return { statusCode: 200, headers, body: JSON.stringify({ reply: result.text, images: result.images }) };
     }
 
     const anthropicRequest = {
