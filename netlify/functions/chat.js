@@ -329,7 +329,7 @@ const SETUP_TOOLS = [
 const SECRETARY_SYSTEM_PROMPT = `あなたは「秘書Zoe」です。the合同会社が運営する複数の事業(the.chatBOT=Zoe001、今後追加されるPicoPay等)の設定を、会話だけで管理するための、社内専用のアシスタントです。話し相手は運営者本人だけです。
 
 # できること
-1. 「Zoe001教育モード」のように言われたら、get_bot_configツールでそのbotIdの現在のシステムプロンプトを取得し、内容を要約して見せる。その後、運営者との会話の中で、どう変更したいかをヒアリングし、変更後の完全なシステムプロンプト案を組み立てていく。「今のままで良い」「変更なし」と言われた場合は、取得できた現在の内容をそのままset_bot_configに渡すこと(空の内容で保存してはいけない)
+1. 「Zoe001教育モード」のように言われたら、get_bot_configツールでそのbotIdの現在のシステムプロンプトを取得し、内容を要約して見せる。その後、運営者との会話の中で、どう変更したいかをヒアリングし、変更後の完全なシステムプロンプト案を組み立てていく。「今のままで良い」「変更なし」と言われた場合は、必ずconfirm_no_changeツールを使うこと(set_bot_configで全文を書き直す必要はなく、そちらの方が速く確実)
 2. 「Zoe001教育モード終了」と言われたら、「保存しますか?」と確認する。「保存」と言われたら、それまでの会話で合意した完全なシステムプロンプトの内容で、set_bot_configツールを呼んで保存する。保存しない場合は、そのまま変更を破棄して通常モードに戻る
 3. 「管理Zoe登録」と言われたら、割り当てたいリポジトリ名を尋ね、register_botツールで次の空き番号(Zoe002等)を発行する
 4. 6桁のお客様IDを伝えられたら、get_customer_infoツールでそのお客様の情報(会社名・連絡先・ステータス・支払い状況等)を取得して分かりやすく伝える
@@ -354,7 +354,7 @@ const SECRETARY_TOOLS = [
   },
   {
     name: "set_bot_config",
-    description: "指定したbotIdの新しいシステムプロンプトを保存する。運営者との会話で合意した完全な内容を渡すこと。",
+    description: "指定したbotIdの新しいシステムプロンプトを保存する。運営者との会話で合意した完全な内容を渡すこと。何も変更がない場合は、これではなくconfirm_no_changeツールを使うこと(処理が速く済むため)。",
     input_schema: {
       type: "object",
       properties: {
@@ -362,6 +362,17 @@ const SECRETARY_TOOLS = [
         systemPrompt: { type: "string", description: "保存する完全なシステムプロンプトの内容" },
       },
       required: ["botId", "systemPrompt"],
+    },
+  },
+  {
+    name: "confirm_no_change",
+    description: "運営者が「今のままで良い」「変更なし」と言った場合に使う。get_bot_configで取得済みの現在の内容を、書き直すことなくそのまま保存する(高速)。",
+    input_schema: {
+      type: "object",
+      properties: {
+        botId: { type: "string", description: "例: Zoe001" },
+      },
+      required: ["botId"],
     },
   },
   {
@@ -419,26 +430,41 @@ async function callCustomerAdmin(body) {
   return await res.json();
 }
 
+async function getEffectiveBotPrompt(botId) {
+  const data = await callBotConfig({ action: "get", botId });
+  if (data.record && data.record.systemPrompt && data.record.systemPrompt.trim()) {
+    return data.record.systemPrompt;
+  }
+  if (botId === "Zoe001") {
+    return SALES_SYSTEM_PROMPT;
+  }
+  return null;
+}
+
 async function executeSecretaryTool(name, input) {
   try {
     if (name === "get_bot_config") {
-      const data = await callBotConfig({ action: "get", botId: input.botId });
-      // Zoe001はまだbot-configsストアが空でも、実際にはコード内の初期設定(SALES_SYSTEM_PROMPT)で
-      // 動いているため、空の場合はその「今動いている実際の内容」を見せる
-      if (input.botId === "Zoe001" && (!data.record || !data.record.systemPrompt || !data.record.systemPrompt.trim())) {
-        return JSON.stringify({
-          record: {
-            botId: "Zoe001",
-            systemPrompt: SALES_SYSTEM_PROMPT,
-            note: "これは現在実際に動いている初期設定です(まだ秘書Zoe経由では編集されていません)",
-          },
-        });
+      const prompt = await getEffectiveBotPrompt(input.botId);
+      if (prompt === null) {
+        return JSON.stringify({ record: { botId: input.botId, systemPrompt: "", note: "未登録またはまだ何も設定されていません" } });
       }
-      return JSON.stringify(data);
+      const isDefault = input.botId === "Zoe001" && prompt === SALES_SYSTEM_PROMPT;
+      return JSON.stringify({
+        record: { botId: input.botId, systemPrompt: prompt },
+        note: isDefault ? "これは現在実際に動いている初期設定です(まだ秘書Zoe経由では編集されていません)" : undefined,
+      });
     }
     if (name === "set_bot_config") {
       const data = await callBotConfig({ action: "set", botId: input.botId, systemPrompt: input.systemPrompt });
       return data.saved ? `${input.botId} の設定を保存しました。` : "保存に失敗しました: " + (data.error || "不明なエラー");
+    }
+    if (name === "confirm_no_change") {
+      const prompt = await getEffectiveBotPrompt(input.botId);
+      if (prompt === null) {
+        return "現在の内容が取得できませんでした。先にget_bot_configで内容を確認してください。";
+      }
+      const data = await callBotConfig({ action: "set", botId: input.botId, systemPrompt: prompt });
+      return data.saved ? `${input.botId} を変更なしでそのまま保存しました。` : "保存に失敗しました: " + (data.error || "不明なエラー");
     }
     if (name === "register_bot") {
       const data = await callBotConfig({ action: "register", repoName: input.repoName });
