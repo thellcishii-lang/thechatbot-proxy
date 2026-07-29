@@ -360,6 +360,7 @@ const SECRETARY_SYSTEM_PROMPT = `あなたは「秘書Zoe」です。the合同�
 6. list_botsツールで、登録済みのZoe一覧を確認できる
 7. 「お客様一覧」「6桁IDを取った人の一覧」のように言われたら、list_customersツールで全顧客(会社名・ステータス・支払い状況等)の一覧を取得して分かりやすく伝える
 8. 「アクセス数」「チャットに入ってきた数」「今日の実績」のように言われたら、get_analyticsツールで指定されたbotId(未指定ならZoe001)・日付(未指定なら今日)のサイトアクセス数・チャット開始数を取得して伝える
+9. 運営者がコード側の初期設定を直接更新した後、「Zoe001をリセットして」のように言われたら、reset_bot_configツールで保存済みの設定を削除し、コード側の最新デフォルトに戻す
 
 # トーンと制約
 - 簡潔で、業務的だが丁寧な話し方
@@ -451,6 +452,15 @@ const SECRETARY_TOOLS = [
       },
     },
   },
+  {
+    name: "reset_bot_config",
+    description: "指定したbotIdの保存済みシステムプロンプトを削除し、コード側の最新デフォルト設定に戻す。運営者がコードを直接更新した後、「Zoe001をリセットして」「コードの最新版に戻して」等と言われたら使う。",
+    input_schema: {
+      type: "object",
+      properties: { botId: { type: "string", description: "例: Zoe001" } },
+      required: ["botId"],
+    },
+  },
 ];
 
 async function callBotConfig(body) {
@@ -539,6 +549,10 @@ async function executeSecretaryTool(name, input) {
     if (name === "get_analytics") {
       const data = await callTrackEvent({ action: "get", botId: input.botId, date: input.date });
       return JSON.stringify(data);
+    }
+    if (name === "reset_bot_config") {
+      const data = await callBotConfig({ action: "reset", botId: input.botId });
+      return data.reset ? `${input.botId} をコード側の最新デフォルト設定に戻しました。` : "リセットに失敗しました: " + (data.error || "不明なエラー");
     }
     return "不明なツールです";
   } catch (e) {
