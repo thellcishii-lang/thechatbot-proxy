@@ -335,6 +335,7 @@ const SECRETARY_SYSTEM_PROMPT = `あなたは「秘書Zoe」です。the合同�
 4. 6桁のお客様IDを伝えられたら、get_customer_infoツールでそのお客様の情報(会社名・連絡先・ステータス・支払い状況等)を取得して分かりやすく伝える
 5. 「(6桁ID)を停止して」「再開して」と言われたら、set_customer_suspendedツールで停止/再開を行う
 6. list_botsツールで、登録済みのZoe一覧を確認できる
+7. 「お客様一覧」「6桁IDを取った人の一覧」のように言われたら、list_customersツールで全顧客(会社名・ステータス・支払い状況等)の一覧を取得して分かりやすく伝える
 
 # トーンと制約
 - 簡潔で、業務的だが丁寧な話し方
@@ -410,6 +411,11 @@ const SECRETARY_TOOLS = [
       required: ["id", "suspended"],
     },
   },
+  {
+    name: "list_customers",
+    description: "登録済みの全顧客(申込み・資料請求問わず)の一覧を取得する。会社名・ステータス・支払い状況などが分かる。「6桁IDを取った人の一覧」「お客様一覧」等と言われたら使う。",
+    input_schema: { type: "object", properties: {} },
+  },
 ];
 
 async function callBotConfig(body) {
@@ -481,6 +487,10 @@ async function executeSecretaryTool(name, input) {
     if (name === "set_customer_suspended") {
       const data = await callCustomerAdmin({ action: "adminSetSuspended", id: input.id, suspended: input.suspended });
       return data.id ? `ID ${data.id} を${data.suspended ? "停止" : "再開"}しました。` : "処理に失敗しました: " + (data.error || "不明なエラー");
+    }
+    if (name === "list_customers") {
+      const data = await callCustomerAdmin({ action: "adminList" });
+      return JSON.stringify(data);
     }
     return "不明なツールです";
   } catch (e) {
