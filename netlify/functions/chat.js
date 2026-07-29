@@ -537,12 +537,16 @@ async function runSecretaryAgent(messages) {
     const data = await response.json();
     if (data.error) return "エラーが発生しました: " + JSON.stringify(data.error);
 
-    const toolUseBlock = (data.content || []).find((b) => b.type === "tool_use");
-    if (toolUseBlock) {
-      const toolResultText = await executeSecretaryTool(toolUseBlock.name, toolUseBlock.input);
+    const toolUseBlocks = (data.content || []).filter((b) => b.type === "tool_use");
+    if (toolUseBlocks.length > 0) {
+      const toolResultBlocks = [];
+      for (const block of toolUseBlocks) {
+        const toolResultText = await executeSecretaryTool(block.name, block.input);
+        toolResultBlocks.push({ type: "tool_result", tool_use_id: block.id, content: toolResultText });
+      }
       currentMessages = currentMessages.concat([
         { role: "assistant", content: data.content },
-        { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseBlock.id, content: toolResultText }] },
+        { role: "user", content: toolResultBlocks },
       ]);
       continue;
     }
