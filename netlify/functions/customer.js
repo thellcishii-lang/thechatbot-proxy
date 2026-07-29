@@ -298,6 +298,24 @@ exports.handler = async (event) => {
       return { statusCode: 200, headers, body: JSON.stringify({ id: req.id, suspended: updated.suspended }) };
     }
 
+    // ⑩ 秘書Zoe専用:登録済みの全顧客を一覧取得する(パスワードは含めない)
+    if (req.action === "adminList") {
+      if (!process.env.INTERNAL_FUNCTION_SECRET || req.secret !== process.env.INTERNAL_FUNCTION_SECRET) {
+        return { statusCode: 401, headers, body: JSON.stringify({ error: "許可されていません" }) };
+      }
+      const { blobs } = await store.list();
+      const records = [];
+      for (const b of blobs) {
+        const record = await store.get(b.key, { type: "json" });
+        if (record) {
+          const { password, ...safeRecord } = record;
+          records.push(safeRecord);
+        }
+      }
+      records.sort((a, b) => (a.createdAt > b.createdAt ? -1 : 1)); // 新しい順
+      return { statusCode: 200, headers, body: JSON.stringify({ count: records.length, records }) };
+    }
+
     return { statusCode: 400, headers, body: JSON.stringify({ error: "不明なactionです" }) };
   } catch (err) {
     return { statusCode: 500, headers, body: JSON.stringify({ error: "内部エラー: " + err.message }) };
