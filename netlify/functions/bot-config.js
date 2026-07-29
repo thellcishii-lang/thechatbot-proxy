@@ -103,6 +103,18 @@ exports.handler = async (event) => {
       return { statusCode: 200, headers, body: JSON.stringify({ records }) };
     }
 
+    if (req.action === "reset") {
+      if (!req.botId) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "botIdが指定されていません" }) };
+      }
+      // 保存済みのシステムプロンプトだけを空にする(登録情報自体は残す)。
+      // これにより、次回からはchat.js内のコード側デフォルト設定が使われるようになる。
+      const existing = (await store.get(req.botId, { type: "json" })) || { botId: req.botId };
+      const updated = { ...existing, systemPrompt: "", updatedAt: new Date().toISOString() };
+      await store.setJSON(req.botId, updated);
+      return { statusCode: 200, headers, body: JSON.stringify({ reset: true }) };
+    }
+
     return { statusCode: 400, headers, body: JSON.stringify({ error: "不明なactionです" }) };
   } catch (err) {
     return { statusCode: 500, headers, body: JSON.stringify({ error: "内部エラー: " + err.message }) };
