@@ -75,7 +75,7 @@ exports.handler = async (event) => {
         }),
       };
     }
-    const { to, subject, text } = JSON.parse(event.body);
+    const { to, subject, text, attachments } = JSON.parse(event.body);
     if (!to || !subject || !text) {
       return {
         statusCode: 400,
@@ -90,12 +90,26 @@ exports.handler = async (event) => {
         pass: gmailAppPassword,
       },
     });
-    await transporter.sendMail({
+
+    const mailOptions = {
       from: `"Zoe (the.chatBOT)" <${gmailUser}>`,
       to: to,
       subject: subject,
       text: text,
-    });
+    };
+
+    // 添付ファイル(base64文字列の配列: [{filename, content}])が渡された場合、
+    // nodemailerが扱える形式(Bufferに変換)にして添付する
+    if (Array.isArray(attachments) && attachments.length > 0) {
+      mailOptions.attachments = attachments
+        .filter((a) => a && a.filename && a.content)
+        .map((a) => ({
+          filename: a.filename,
+          content: Buffer.from(a.content, "base64"),
+        }));
+    }
+
+    await transporter.sendMail(mailOptions);
     return {
       statusCode: 200,
       headers,
