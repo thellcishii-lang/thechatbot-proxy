@@ -362,6 +362,7 @@ const SECRETARY_SYSTEM_PROMPT = `あなたは「秘書Zoe」です。the合同�
 9. 運営者がコード側の初期設定を直接更新した後、「Zoe001をリセットして」のように言われたら、reset_bot_configツールで保存済みの設定を削除し、コード側の最新デフォルトに戻す
 10. 「(6桁ID)を削除して」と言われたら、必ず「本当に削除してよろしいですか?元に戻せません」と一度確認してから、delete_customerツールで削除する
 11. 「お客様リストをリセットして」「全部削除して」のように言われたら、必ず「登録済みの全顧客データを削除しますが、本当によろしいですか?元に戻せません」と明確に確認し、同意が得られてからreset_customer_listツールを使う
+12. 運営者が「サイトのチャットもブロック解除して」「自分のIPのブロックを解除して」のように言ったら、unblock_this_ipツールで、今話しかけている運営者自身のIPアドレスにかかったzoe-chat等の公開チャット向けのブロックを解除する
 12. web_searchツールで、外部サイトの情報を調べることができる。競合調査や最新情報の確認等に使ってよい
 13. 画像やPDFが送られてきた場合、その内容を読み取って回答に活かす
 14. お客様一覧やアクセス数などのデータを見せる時は、読みやすいMarkdownの表(| 列 | 列 |の形式)で出すこと。生のJSONをそのまま貼り付けない
@@ -480,6 +481,11 @@ const SECRETARY_TOOLS = [
     description: "登録済みの全顧客データを一括削除する(テストデータの全リセット用)。非常に破壊的な操作なので、「本当に全部削除して良いですか?」と必ず明確な確認を取ってから使うこと。",
     input_schema: { type: "object", properties: {} },
   },
+  {
+    name: "unblock_this_ip",
+    description: "運営者が「サイトのチャットもブロック解除して」「自分のIPのブロックを解除して」等と言った場合に使う。今この会話をしている運営者自身のIPアドレスにかかった、zoe-chat等の公開チャット向けのブロック(ブラックリスト)を解除する。",
+    input_schema: { type: "object", properties: {} },
+  },
 ];
 
 async function callBotConfig(body) {
@@ -520,7 +526,7 @@ async function callTrackEvent(body) {
   return await res.json();
 }
 
-async function executeSecretaryTool(name, input) {
+async function executeSecretaryTool(name, input, requesterIp) {
   try {
     if (name === "get_bot_config") {
       const prompt = await getEffectiveBotPrompt(input.botId);
@@ -581,6 +587,22 @@ async function executeSecretaryTool(name, input) {
       const data = await callCustomerAdmin({ action: "adminDeleteAll", confirm: true });
       return data.deleted ? `${data.count}件の顧客データをすべて削除しました。` : "削除に失敗しました: " + (data.error || "不明なエラー");
     }
+    if (name === "unblock_this_ip") {
+      try {
+        const store = getStore({
+          name: "rate-limit-chat",
+          siteID: process.env.NETLIFY_SITE_ID,
+          token: process.env.NETLIFY_API_TOKEN,
+        });
+        if (requesterIp) {
+          await store.delete(requesterIp);
+          return `IPアドレス(${requesterIp})のブロックを解除しました。`;
+        }
+        return "IPアドレスが取得できなかったため、解除できませんでした。";
+      } catch (e) {
+        return "解除中にエラーが発生しました: " + e.message;
+      }
+    }
     return "不明なツールです";
   } catch (e) {
     return "ツール実行中にエラーが発生しました: " + e.message;
@@ -621,7 +643,7 @@ function extractImages(contentArray) {
   return images;
 }
 
-async function runSecretaryAgent(messages) {
+async function runSecretaryAgent(messages, requesterIp) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   let currentMessages = messages.slice();
   const collectedImages = [];
@@ -656,7 +678,7 @@ async function runSecretaryAgent(messages) {
     if (toolUseBlocks.length > 0) {
       const toolResultBlocks = [];
       for (const block of toolUseBlocks) {
-        const toolResultText = await executeSecretaryTool(block.name, block.input);
+        const toolResultText = await executeSecretaryTool(block.name, block.input, requesterIp);
         toolResultBlocks.push({ type: "tool_result", tool_use_id: block.id, content: toolResultText });
       }
       currentMessages = currentMessages.concat([
@@ -690,21 +712,32 @@ exports.handler = async (event) => {
     };
   }
 
+  let requestBody;
+  try {
+    requestBody = JSON.parse(event.body);
+  } catch (e) {
+    return { statusCode: 400, headers, body: JSON.stringify({ error: "リクエストの形式が不正です" }) };
+  }
+
   const clientIp = getClientIp(event);
-  const rateLimitResult = await checkRateLimit(clientIp);
-  if (!rateLimitResult.allowed) {
-    if (rateLimitResult.reason === "blacklisted") {
+  // 秘書Zoe(mode:secretary)は、Face ID認証という別の強固な保護があるため、
+  // 誰でもアクセスできる公開画面向けのIPレート制限の対象外とする
+  if (requestBody.mode !== "secretary") {
+    const rateLimitResult = await checkRateLimit(clientIp);
+    if (!rateLimitResult.allowed) {
+      if (rateLimitResult.reason === "blacklisted") {
+        return {
+          statusCode: 403,
+          headers,
+          body: JSON.stringify({ error: "このIPアドレスは、不審なアクセスが検知されたため利用を制限しています。" }),
+        };
+      }
       return {
-        statusCode: 403,
+        statusCode: 429,
         headers,
-        body: JSON.stringify({ error: "このIPアドレスは、不審なアクセスが検知されたため利用を制限しています。" }),
+        body: JSON.stringify({ error: "リクエストが多すぎます。しばらくしてから再度お試しください。" }),
       };
     }
-    return {
-      statusCode: 429,
-      headers,
-      body: JSON.stringify({ error: "リクエストが多すぎます。しばらくしてから再度お試しください。" }),
-    };
   }
 
   try {
@@ -718,14 +751,13 @@ exports.handler = async (event) => {
         }),
       };
     }
-    const requestBody = JSON.parse(event.body);
 
     if (requestBody.mode === "secretary") {
       const valid = await isValidAdminSession(requestBody.sessionToken);
       if (!valid) {
         return { statusCode: 401, headers, body: JSON.stringify({ error: "セッションが無効です。再度ログインしてください。" }) };
       }
-      const result = await runSecretaryAgent(requestBody.messages || []);
+      const result = await runSecretaryAgent(requestBody.messages || [], clientIp);
       return { statusCode: 200, headers, body: JSON.stringify({ reply: result.text, images: result.images }) };
     }
 
