@@ -7,6 +7,7 @@
 
 const { getStore } = require("@netlify/blobs");
 const { generateRegistrationOptions } = require("@simplewebauthn/server");
+const crypto = require("crypto");
 
 const RP_NAME = "the.chatBOT 秘書Zoe";
 const RP_ID = "the-chatbot.com";
@@ -40,6 +41,7 @@ exports.handler = async (event) => {
     const options = await generateRegistrationOptions({
       rpName: RP_NAME,
       rpID: RP_ID,
+      userID: crypto.randomBytes(32),
       userName: "admin",
       attestationType: "none",
       authenticatorSelection: {
