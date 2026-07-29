@@ -570,8 +570,24 @@ exports.handler = async (event) => {
     };
 
     if (requestBody.mode === "zoe-chat") {
-      // フロントから system / tools が送られてきても無視し、必ずサーバー側の内容を使う
-      anthropicRequest.system = SALES_SYSTEM_PROMPT;
+      // フロントから system / tools が送られてきても無視し、必ずサーバー側の内容を使う。
+      // 秘書ZoeがZoe001の設定を編集していれば、その内容を優先する(bot-configsストア)。
+      // まだ編集されていない(空)場合は、これまで通りの初期設定にフォールバックする。
+      let systemPromptToUse = SALES_SYSTEM_PROMPT;
+      try {
+        const botConfigStore = getStore({
+          name: "bot-configs",
+          siteID: process.env.NETLIFY_SITE_ID,
+          token: process.env.NETLIFY_API_TOKEN,
+        });
+        const zoe001 = await botConfigStore.get("Zoe001", { type: "json" });
+        if (zoe001 && zoe001.systemPrompt && zoe001.systemPrompt.trim()) {
+          systemPromptToUse = zoe001.systemPrompt;
+        }
+      } catch (e) {
+        // 取得に失敗した場合は、安全のため初期設定のまま進める
+      }
+      anthropicRequest.system = systemPromptToUse;
       anthropicRequest.tools = SALES_TOOLS;
     } else if (requestBody.mode === "zoe-setup") {
       // 名前・メールアドレスはお客様本人が既に知っている情報なので受け取って埋め込むが、
