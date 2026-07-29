@@ -47,9 +47,17 @@ exports.handler = async (event) => {
       expectedChallenge: challengeRecord.challenge,
       expectedOrigin: ORIGIN,
       expectedRPID: RP_ID,
+      // ライブラリのバージョン差異により、パラメータ名が credential だったり
+      // authenticator だったりするため、念のため両方を渡しておく(使われない方は無視される)
       credential: {
         id: credentialRecord.credentialID,
         publicKey: Buffer.from(credentialRecord.credentialPublicKey, "base64"),
+        counter: credentialRecord.counter,
+        transports: credentialRecord.transports,
+      },
+      authenticator: {
+        credentialID: Buffer.from(credentialRecord.credentialID, "base64url"),
+        credentialPublicKey: Buffer.from(credentialRecord.credentialPublicKey, "base64"),
         counter: credentialRecord.counter,
         transports: credentialRecord.transports,
       },
@@ -59,8 +67,11 @@ exports.handler = async (event) => {
       return { statusCode: 401, headers, body: JSON.stringify({ error: "Face ID認証に失敗しました" }) };
     }
 
-    // カウンター(リプレイ攻撃対策用)を更新
-    credentialRecord.counter = verification.authenticationInfo.newCounter;
+    // カウンター(リプレイ攻撃対策用)を更新。フィールド名の差異にも対応する
+    const newCounter =
+      (verification.authenticationInfo && (verification.authenticationInfo.newCounter ?? verification.authenticationInfo.counter)) ??
+      credentialRecord.counter;
+    credentialRecord.counter = newCounter;
     await store.setJSON("credential", credentialRecord);
     await store.delete("authChallenge");
 
