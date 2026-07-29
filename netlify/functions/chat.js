@@ -336,6 +336,7 @@ const SECRETARY_SYSTEM_PROMPT = `あなたは「秘書Zoe」です。the合同�
 5. 「(6桁ID)を停止して」「再開して」と言われたら、set_customer_suspendedツールで停止/再開を行う
 6. list_botsツールで、登録済みのZoe一覧を確認できる
 7. 「お客様一覧」「6桁IDを取った人の一覧」のように言われたら、list_customersツールで全顧客(会社名・ステータス・支払い状況等)の一覧を取得して分かりやすく伝える
+8. 「アクセス数」「チャットに入ってきた数」「今日の実績」のように言われたら、get_analyticsツールで指定されたbotId(未指定ならZoe001)・日付(未指定なら今日)のサイトアクセス数・チャット開始数を取得して伝える
 
 # トーンと制約
 - 簡潔で、業務的だが丁寧な話し方
@@ -416,6 +417,17 @@ const SECRETARY_TOOLS = [
     description: "登録済みの全顧客(申込み・資料請求問わず)の一覧を取得する。会社名・ステータス・支払い状況などが分かる。「6桁IDを取った人の一覧」「お客様一覧」等と言われたら使う。",
     input_schema: { type: "object", properties: {} },
   },
+  {
+    name: "get_analytics",
+    description: "指定したbotId(例: Zoe001)の、指定した日(省略時は今日)のサイトアクセス数・チャット開始数を取得する。「アクセス数」「チャットに入ってきた数」等と言われたら使う。",
+    input_schema: {
+      type: "object",
+      properties: {
+        botId: { type: "string", description: "例: Zoe001。省略時はZoe001" },
+        date: { type: "string", description: "YYYY-MM-DD形式。省略時は今日(日本時間)" },
+      },
+    },
+  },
 ];
 
 async function callBotConfig(body) {
@@ -445,6 +457,15 @@ async function getEffectiveBotPrompt(botId) {
     return SALES_SYSTEM_PROMPT;
   }
   return null;
+}
+
+async function callTrackEvent(body) {
+  const res = await fetch("https://chatbot-proxy.netlify.app/.netlify/functions/track-event", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...body, secret: process.env.INTERNAL_FUNCTION_SECRET }),
+  });
+  return await res.json();
 }
 
 async function executeSecretaryTool(name, input) {
@@ -490,6 +511,10 @@ async function executeSecretaryTool(name, input) {
     }
     if (name === "list_customers") {
       const data = await callCustomerAdmin({ action: "adminList" });
+      return JSON.stringify(data);
+    }
+    if (name === "get_analytics") {
+      const data = await callTrackEvent({ action: "get", botId: input.botId, date: input.date });
       return JSON.stringify(data);
     }
     return "不明なツールです";
