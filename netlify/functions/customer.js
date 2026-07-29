@@ -164,6 +164,7 @@ exports.handler = async (event) => {
           customerName: record.customerName,
           status: record.status,
           systemPrompt: record.systemPrompt,
+          suspended: !!record.suspended,
         }),
       };
     }
@@ -262,6 +263,39 @@ exports.handler = async (event) => {
       const updated = { ...record, paid: true, paidAt: new Date().toISOString() };
       await store.setJSON(req.id, updated);
       return { statusCode: 200, headers, body: JSON.stringify({ id: req.id, paid: true }) };
+    }
+
+    // ⑧ 秘書Zoe専用:指定IDの顧客情報を取得する(パスワードは含めない)
+    if (req.action === "adminGet") {
+      if (!process.env.INTERNAL_FUNCTION_SECRET || req.secret !== process.env.INTERNAL_FUNCTION_SECRET) {
+        return { statusCode: 401, headers, body: JSON.stringify({ error: "許可されていません" }) };
+      }
+      if (!req.id) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "idが指定されていません" }) };
+      }
+      const record = await store.get(req.id, { type: "json" });
+      if (!record) {
+        return { statusCode: 404, headers, body: JSON.stringify({ error: "そのIDは存在しません" }) };
+      }
+      const { password, ...safeRecord } = record;
+      return { statusCode: 200, headers, body: JSON.stringify({ record: safeRecord }) };
+    }
+
+    // ⑨ 秘書Zoe専用:指定IDの顧客を停止/再開する
+    if (req.action === "adminSetSuspended") {
+      if (!process.env.INTERNAL_FUNCTION_SECRET || req.secret !== process.env.INTERNAL_FUNCTION_SECRET) {
+        return { statusCode: 401, headers, body: JSON.stringify({ error: "許可されていません" }) };
+      }
+      if (!req.id) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "idが指定されていません" }) };
+      }
+      const record = await store.get(req.id, { type: "json" });
+      if (!record) {
+        return { statusCode: 404, headers, body: JSON.stringify({ error: "そのIDは存在しません" }) };
+      }
+      const updated = { ...record, suspended: !!req.suspended };
+      await store.setJSON(req.id, updated);
+      return { statusCode: 200, headers, body: JSON.stringify({ id: req.id, suspended: updated.suspended }) };
     }
 
     return { statusCode: 400, headers, body: JSON.stringify({ error: "不明なactionです" }) };
