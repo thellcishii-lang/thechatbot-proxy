@@ -42,12 +42,9 @@ exports.handler = async (event) => {
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
       userVerification: "required",
-      allowCredentials: [
-        {
-          id: credentialRecord.credentialID,
-          transports: credentialRecord.transports,
-        },
-      ],
+      // 特定の鍵IDを指定せず、この端末に保存されている
+      // the-chatbot.com向けのパスキーであれば何でも使えるようにする
+      // (IDの受け渡しでズレが起きる問題を避けるため)
     });
 
     await store.setJSON("authChallenge", { challenge: options.challenge, createdAt: Date.now() });
