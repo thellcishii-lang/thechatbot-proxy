@@ -41,7 +41,7 @@ exports.handler = async (event) => {
     const options = await generateRegistrationOptions({
       rpName: RP_NAME,
       rpID: RP_ID,
-      userID: crypto.randomBytes(32),
+      userID: crypto.randomBytes(32).toString("base64url"),
       userName: "admin",
       attestationType: "none",
       authenticatorSelection: {
