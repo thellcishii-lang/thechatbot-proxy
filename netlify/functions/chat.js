@@ -318,6 +318,194 @@ const SETUP_TOOLS = [
   },
 ];
 
+// ============================================================
+// 秘書Zoe(mode: "secretary")関連
+// ============================================================
+// 秘書Zoeは全事業の設定を書き換えられる強力な存在のため、ツールの定義・
+// 実行ロジックを一切ブラウザに出さず、この関数の中だけで完結させます。
+// フロント(zoe-admin.html)は「送ったメッセージ」と「返ってきた返事」の
+// やり取りだけを行い、途中のツール呼び出しは一切見えません。
+
+const SECRETARY_SYSTEM_PROMPT = `あなたは「秘書Zoe」です。the合同会社が運営する複数の事業(the.chatBOT=Zoe001、今後追加されるPicoPay等)の設定を、会話だけで管理するための、社内専用のアシスタントです。話し相手は運営者本人だけです。
+
+# できること
+1. 「Zoe001教育モード」のように言われたら、get_bot_configツールでそのbotIdの現在のシステムプロンプトを取得し、内容を要約して見せる。その後、運営者との会話の中で、どう変更したいかをヒアリングし、変更後の完全なシステムプロンプト案を組み立てていく
+2. 「Zoe001教育モード終了」と言われたら、「保存しますか?」と確認する。「保存」と言われたら、それまでの会話で合意した完全なシステムプロンプトの内容で、set_bot_configツールを呼んで保存する。保存しない場合は、そのまま変更を破棄して通常モードに戻る
+3. 「管理Zoe登録」と言われたら、割り当てたいリポジトリ名を尋ね、register_botツールで次の空き番号(Zoe002等)を発行する
+4. 6桁のお客様IDを伝えられたら、get_customer_infoツールでそのお客様の情報(会社名・連絡先・ステータス・支払い状況等)を取得して分かりやすく伝える
+5. 「(6桁ID)を停止して」「再開して」と言われたら、set_customer_suspendedツールで停止/再開を行う
+6. list_botsツールで、登録済みのZoe一覧を確認できる
+
+# トーンと制約
+- 簡潔で、業務的だが丁寧な話し方
+- システムプロンプトを保存する前は、必ず変更内容の要約を見せて確認を取る
+- 破壊的な操作(保存、停止)を行う前は、必ず一度確認を挟む
+- 会話の内容から、明らかに教育モード中だと分かる場合は、そのまま自然に会話を続けてよい(毎回「教育モードです」と言い直す必要はない)`;
+
+const SECRETARY_TOOLS = [
+  {
+    name: "get_bot_config",
+    description: "指定したbotId(例: Zoe001)の現在のシステムプロンプト・登録情報を取得する。",
+    input_schema: {
+      type: "object",
+      properties: { botId: { type: "string", description: "例: Zoe001" } },
+      required: ["botId"],
+    },
+  },
+  {
+    name: "set_bot_config",
+    description: "指定したbotIdの新しいシステムプロンプトを保存する。運営者との会話で合意した完全な内容を渡すこと。",
+    input_schema: {
+      type: "object",
+      properties: {
+        botId: { type: "string", description: "例: Zoe001" },
+        systemPrompt: { type: "string", description: "保存する完全なシステムプロンプトの内容" },
+      },
+      required: ["botId", "systemPrompt"],
+    },
+  },
+  {
+    name: "register_bot",
+    description: "新しい事業用に、次の空き番号(Zoe002等)を割り当てて登録する。",
+    input_schema: {
+      type: "object",
+      properties: { repoName: { type: "string", description: "割り当てるリポジトリ名・事業名" } },
+      required: ["repoName"],
+    },
+  },
+  {
+    name: "list_bots",
+    description: "登録済みのZoe一覧(botId・割り当て先)を取得する。",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "get_customer_info",
+    description: "6桁IDを指定して、そのお客様の情報(会社名・連絡先・ステータス・支払い状況・停止中かどうか等)を取得する。",
+    input_schema: {
+      type: "object",
+      properties: { id: { type: "string", description: "6桁のお客様ID" } },
+      required: ["id"],
+    },
+  },
+  {
+    name: "set_customer_suspended",
+    description: "6桁IDを指定して、そのお客様のサービスを停止/再開する。",
+    input_schema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "6桁のお客様ID" },
+        suspended: { type: "boolean", description: "true=停止する、false=再開する" },
+      },
+      required: ["id", "suspended"],
+    },
+  },
+];
+
+async function callBotConfig(body) {
+  const res = await fetch("https://chatbot-proxy.netlify.app/.netlify/functions/bot-config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...body, secret: process.env.INTERNAL_FUNCTION_SECRET }),
+  });
+  return await res.json();
+}
+
+async function callCustomerAdmin(body) {
+  const res = await fetch("https://chatbot-proxy.netlify.app/.netlify/functions/customer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...body, secret: process.env.INTERNAL_FUNCTION_SECRET }),
+  });
+  return await res.json();
+}
+
+async function executeSecretaryTool(name, input) {
+  try {
+    if (name === "get_bot_config") {
+      const data = await callBotConfig({ action: "get", botId: input.botId });
+      return JSON.stringify(data);
+    }
+    if (name === "set_bot_config") {
+      const data = await callBotConfig({ action: "set", botId: input.botId, systemPrompt: input.systemPrompt });
+      return data.saved ? `${input.botId} の設定を保存しました。` : "保存に失敗しました: " + (data.error || "不明なエラー");
+    }
+    if (name === "register_bot") {
+      const data = await callBotConfig({ action: "register", repoName: input.repoName });
+      return data.botId ? `新しく ${data.botId} を「${input.repoName}」に割り当てました。` : "登録に失敗しました: " + (data.error || "不明なエラー");
+    }
+    if (name === "list_bots") {
+      const data = await callBotConfig({ action: "list" });
+      return JSON.stringify(data);
+    }
+    if (name === "get_customer_info") {
+      const data = await callCustomerAdmin({ action: "adminGet", id: input.id });
+      return JSON.stringify(data);
+    }
+    if (name === "set_customer_suspended") {
+      const data = await callCustomerAdmin({ action: "adminSetSuspended", id: input.id, suspended: input.suspended });
+      return data.id ? `ID ${data.id} を${data.suspended ? "停止" : "再開"}しました。` : "処理に失敗しました: " + (data.error || "不明なエラー");
+    }
+    return "不明なツールです";
+  } catch (e) {
+    return "ツール実行中にエラーが発生しました: " + e.message;
+  }
+}
+
+async function isValidAdminSession(sessionToken) {
+  if (!sessionToken) return false;
+  try {
+    const store = getStore({
+      name: "admin-sessions",
+      siteID: process.env.NETLIFY_SITE_ID,
+      token: process.env.NETLIFY_API_TOKEN,
+    });
+    const record = await store.get(sessionToken, { type: "json" });
+    if (!record) return false;
+    return Date.now() < record.expiresAt;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function runSecretaryAgent(messages) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  let currentMessages = messages.slice();
+
+  for (let i = 0; i < 8; i++) { // 無限ループ防止のため上限を設ける
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 1500,
+        system: SECRETARY_SYSTEM_PROMPT,
+        messages: currentMessages,
+        tools: SECRETARY_TOOLS,
+      }),
+    });
+    const data = await response.json();
+    if (data.error) return "エラーが発生しました: " + JSON.stringify(data.error);
+
+    const toolUseBlock = (data.content || []).find((b) => b.type === "tool_use");
+    if (toolUseBlock) {
+      const toolResultText = await executeSecretaryTool(toolUseBlock.name, toolUseBlock.input);
+      currentMessages = currentMessages.concat([
+        { role: "assistant", content: data.content },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseBlock.id, content: toolResultText }] },
+      ]);
+      continue;
+    }
+
+    const textBlock = (data.content || []).find((b) => b.type === "text");
+    return textBlock ? textBlock.text : "(応答の取得に失敗しました)";
+  }
+  return "処理が複雑すぎたため、途中で打ち切りました。もう一度お試しください。";
+}
+
 exports.handler = async (event) => {
   // CORS対応(念のため。同一サイト埋め込みなら基本不要)
   const headers = {
@@ -365,6 +553,15 @@ exports.handler = async (event) => {
       };
     }
     const requestBody = JSON.parse(event.body);
+
+    if (requestBody.mode === "secretary") {
+      const valid = await isValidAdminSession(requestBody.sessionToken);
+      if (!valid) {
+        return { statusCode: 401, headers, body: JSON.stringify({ error: "セッションが無効です。再度ログインしてください。" }) };
+      }
+      const reply = await runSecretaryAgent(requestBody.messages || []);
+      return { statusCode: 200, headers, body: JSON.stringify({ reply }) };
+    }
 
     const anthropicRequest = {
       model: requestBody.model || "claude-sonnet-4-6",
