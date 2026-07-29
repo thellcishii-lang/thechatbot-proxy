@@ -52,13 +52,37 @@ exports.handler = async (event) => {
       return { statusCode: 400, headers, body: JSON.stringify({ error: "Face IDの登録に失敗しました" }) };
     }
 
-    const { credential } = verification.registrationInfo;
+    // ライブラリのバージョンによって、credential情報が registrationInfo.credential に
+    // ネストされている場合と、registrationInfo に直接入っている場合の両方があるため、両対応する
+    const info = verification.registrationInfo;
+    let credentialIDRaw, credentialPublicKeyRaw, counter, transports;
+    if (info.credential) {
+      credentialIDRaw = info.credential.id;
+      credentialPublicKeyRaw = info.credential.publicKey;
+      counter = info.credential.counter;
+      transports = info.credential.transports || [];
+    } else {
+      credentialIDRaw = info.credentialID;
+      credentialPublicKeyRaw = info.credentialPublicKey;
+      counter = info.counter;
+      transports = (response && response.response && response.response.transports) || [];
+    }
+
+    if (!credentialIDRaw || !credentialPublicKeyRaw) {
+      return { statusCode: 500, headers, body: JSON.stringify({ error: "登録情報の取得に失敗しました(ライブラリの応答形式が想定と異なります)" }) };
+    }
+
+    // credentialIDが既に文字列(base64url)ならそのまま、Buffer/Uint8Arrayならbase64urlに変換する
+    const credentialID = typeof credentialIDRaw === "string"
+      ? credentialIDRaw
+      : Buffer.from(credentialIDRaw).toString("base64url");
+    const credentialPublicKey = Buffer.from(credentialPublicKeyRaw).toString("base64");
 
     await store.setJSON("credential", {
-      credentialID: credential.id,
-      credentialPublicKey: Buffer.from(credential.publicKey).toString("base64"),
-      counter: credential.counter,
-      transports: credential.transports || [],
+      credentialID,
+      credentialPublicKey,
+      counter,
+      transports,
       registeredAt: new Date().toISOString(),
     });
     await store.delete("regChallenge");
