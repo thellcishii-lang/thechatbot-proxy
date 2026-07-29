@@ -316,6 +316,40 @@ exports.handler = async (event) => {
       return { statusCode: 200, headers, body: JSON.stringify({ count: records.length, records }) };
     }
 
+    // ⑪ 秘書Zoe専用:指定IDの顧客を1件削除する(テスト用データの整理等)
+    if (req.action === "adminDelete") {
+      if (!process.env.INTERNAL_FUNCTION_SECRET || req.secret !== process.env.INTERNAL_FUNCTION_SECRET) {
+        return { statusCode: 401, headers, body: JSON.stringify({ error: "許可されていません" }) };
+      }
+      if (!req.id) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "idが指定されていません" }) };
+      }
+      const record = await store.get(req.id, { type: "json" });
+      if (!record) {
+        return { statusCode: 404, headers, body: JSON.stringify({ error: "そのIDは存在しません" }) };
+      }
+      await store.delete(req.id);
+      return { statusCode: 200, headers, body: JSON.stringify({ deleted: true, id: req.id }) };
+    }
+
+    // ⑫ 秘書Zoe専用:登録済みの全顧客を削除する(テストデータの一括リセット用)。
+    //   誤操作防止のため、req.confirmがtrueの時だけ実行する
+    if (req.action === "adminDeleteAll") {
+      if (!process.env.INTERNAL_FUNCTION_SECRET || req.secret !== process.env.INTERNAL_FUNCTION_SECRET) {
+        return { statusCode: 401, headers, body: JSON.stringify({ error: "許可されていません" }) };
+      }
+      if (req.confirm !== true) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "confirm:trueが必要です(誤操作防止)" }) };
+      }
+      const { blobs } = await store.list();
+      let deletedCount = 0;
+      for (const b of blobs) {
+        await store.delete(b.key);
+        deletedCount++;
+      }
+      return { statusCode: 200, headers, body: JSON.stringify({ deleted: true, count: deletedCount }) };
+    }
+
     return { statusCode: 400, headers, body: JSON.stringify({ error: "不明なactionです" }) };
   } catch (err) {
     return { statusCode: 500, headers, body: JSON.stringify({ error: "内部エラー: " + err.message }) };
