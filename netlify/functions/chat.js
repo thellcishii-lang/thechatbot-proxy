@@ -327,7 +327,7 @@ const SETUP_PROMPT_TEMPLATE = `あなたは「Zoe(ゾーイ)」という対話�
 - お客様が「チャット名を変えたい」等と言ったら、希望のチャット名と、背景色(白/黒)×文字色(黒/青/黄/赤/オレンジ/緑、背景と重複しない組み合わせ)を伺い、update_chat_displayツールで保存する
 
 ## adminパスワードについて
-- お客様が「adminパスワードをください」「テスト用のパスワードが欲しい」等と言ったら、issue_my_admin_passwordツールを呼び、発行されたパスワードを伝える。あわせて「本番チャットのURLの末尾に ?admin=(発行されたパスワード) を付けてアクセスいただくと、テスト目的でのご利用がアクセス制限の集計対象外になります」と説明する
+- お客様が「adminパスワードをください」「テスト用のパスワードが欲しい」等と言ったら、issue_my_admin_passwordツールを呼び、発行されたパスワードを伝える。あわせて「本番チャットで、チャットに『admin』と入力し、パスワードを聞かれたらこのパスワードを入力いただくと、テスト目的でのご利用がアクセス制限の対象外になります」と説明する
 
 # 調べものについて
 - web_searchやweb_fetchツールで、外部の情報を調べることができる。商品登録時に一般的な特徴や競合情報を調べたり、FAQ作成中に業界的によくある質問を補ったりするのに使ってよい
@@ -477,6 +477,7 @@ const SECRETARY_SYSTEM_PROMPT = `あなたは「秘書Zoe」です。the合同�
 5. 「(6桁ID)を停止して」「再開して」と言われたら、set_customer_suspendedツールで停止/再開を行う
 6. list_botsツールで、登録済みのZoe一覧を確認できる
 7. 「お客様一覧」「6桁IDを取った人の一覧」のように言われたら、list_customersツールで全顧客(会社名・ステータス・支払い状況等)の一覧を取得して分かりやすく伝える
+7a. 「(会社名)のadminパスワード発行して」のように、6桁IDではなく会社名で言われたら、issue_admin_passwordにその会社名をそのまま渡さず、まずlist_customersツールで顧客一覧を取得し、該当する会社名の6桁IDを見つけてから、そのIDでissue_admin_passwordを呼ぶこと
 8. 「アクセス数」「チャットに入ってきた数」「今日の実績」のように言われたら、get_analyticsツールで指定されたbotId(未指定ならZoe001)・日付(未指定なら今日)のサイトアクセス数・チャット開始数を取得して伝える
 9. 運営者がコード側の初期設定を直接更新した後、「Zoe001をリセットして」のように言われたら、reset_bot_configツールで保存済みの設定を削除し、コード側の最新デフォルトに戻す
 10. 「(6桁ID)を削除して」と言われたら、必ず「本当に削除してよろしいですか?元に戻せません」と一度確認してから、delete_customerツールで削除する
@@ -608,7 +609,7 @@ const SECRETARY_TOOLS = [
   },
   {
     name: "issue_admin_password",
-    description: "運営者が「(botIdまたは6桁ID)のadminパスワード発行して」と言った場合に使う。発行されたパスワードでチャットURLに?admin=パスワードを付けてアクセスすると、そのアクセスはブラックリスト集計の対象外になる。targetがZoeで始まる場合はbot(受付Zoe等)、6桁の数字の場合はお客様のIDとして扱う。",
+    description: "運営者が「(botIdまたは6桁ID)のadminパスワード発行して」と言った場合に使う。発行されたパスワードは、チャットに「admin」と入力してから聞かれた時に入力する形(受付Zoe・本番チャット)、または設定Zoeのログイン画面でID+このパスワードを入力する形(設定Zoe)で使う。有効なtargetは、6桁のお客様ID、またはZoe001(受付Zoe)のみ。",
     input_schema: {
       type: "object",
       properties: { target: { type: "string", description: "例: Zoe001、または6桁のお客様ID" } },
@@ -791,13 +792,15 @@ async function executeSecretaryTool(name, input, requesterIp) {
         if (/^\d{6}$/.test(target)) {
           const data = await callCustomerAdmin({ action: "generateAdminPassword", id: target });
           return data.adminPassword
-            ? `お客様ID ${target} のadminパスワード: ${data.adminPassword}(URLに ?admin=${data.adminPassword} を付けてアクセスするとブラックリスト対象外になります)`
+            ? `お客様ID ${target} のadminパスワード: ${data.adminPassword}\n\n使い方:\n・設定Zoeのログイン画面に、このIDとこのパスワードを入力するとadminとして入れます(お客様自身の設定は上書きされません)\n・本番チャットでは、チャットに「admin」と入力→パスワードを聞かれたらこのパスワードを入力、で使えます`
             : "発行に失敗しました: " + (data.error || "不明なエラー");
-        } else {
+        } else if (target === "Zoe001") {
           const data = await callBotConfig({ action: "generateAdminPassword", botId: target });
           return data.adminPassword
-            ? `${target} のadminパスワード: ${data.adminPassword}(URLに ?admin=${data.adminPassword} を付けてアクセスするとブラックリスト対象外になります)`
+            ? `${target} のadminパスワード: ${data.adminPassword}\n\n使い方: 受付Zoeのチャットに「admin」と入力→パスワードを聞かれたらこのパスワードを入力してください`
             : "発行に失敗しました: " + (data.error || "不明なエラー");
+        } else {
+          return `${target} には、adminパスワードの仕組みが繋がっていません。発行できるのは、6桁のお客様ID、またはZoe001(受付Zoe)だけです。`;
         }
       } catch (e) {
         return "発行中にエラーが発生しました: " + e.message;
