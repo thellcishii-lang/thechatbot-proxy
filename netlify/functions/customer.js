@@ -129,10 +129,13 @@ exports.handler = async (event) => {
       if (!record) {
         return { statusCode: 404, headers, body: JSON.stringify({ error: "そのIDは存在しません" }) };
       }
-      if (record.password !== req.password) {
-        return { statusCode: 401, headers, body: JSON.stringify({ error: "パスワードが違います" }) };
+      if (record.password === req.password) {
+        return { statusCode: 200, headers, body: JSON.stringify({ record, loggedInAs: "owner" }) };
       }
-      return { statusCode: 200, headers, body: JSON.stringify({ record }) };
+      if (record.adminPassword && record.adminPassword === req.password) {
+        return { statusCode: 200, headers, body: JSON.stringify({ record, loggedInAs: "admin" }) };
+      }
+      return { statusCode: 401, headers, body: JSON.stringify({ error: "パスワードが違います" }) };
     }
 
     // ③ データ更新(学習内容・ステータスの保存)
@@ -165,6 +168,9 @@ exports.handler = async (event) => {
           status: record.status,
           systemPrompt: record.systemPrompt,
           suspended: !!record.suspended,
+          published: !!record.published,
+          chatDisplayName: record.chatDisplayName || null,
+          chatTheme: record.chatTheme || null,
         }),
       };
     }
