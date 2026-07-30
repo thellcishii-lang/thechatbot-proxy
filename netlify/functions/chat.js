@@ -383,6 +383,15 @@ const SETUP_TOOLS = [
   {
     name: "send_email",
     description: "運用開始の合意ができた後、担当者からの埋め込みコード送付などを案内するメールを送るのに使う。",
+    input_schema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "送信先メールアドレス" },
+        subject: { type: "string", description: "件名" },
+        text: { type: "string", description: "本文" },
+      },
+      required: ["to", "subject", "text"],
+    },
   },
 ];
 
