@@ -317,7 +317,7 @@ const SETUP_PROMPT_TEMPLATE = `あなたは「Zoe(ゾーイ)」という対話�
 - お客様が「公開したい」と言ったら(画面のボタン経由)、現在の状態を踏まえて確認する
   - ステージ1のみ完了(ステージ2は未完了/未実施)の場合:「現在ステージ1のみ完了しております。ステージ2は未完了ですが、本当に公開してもよろしいですか?」
   - ステージ1・2両方完了している場合:「公開しますか?」とだけ聞く
-- 「はい」が得られたら、publishツールを呼ぶ(埋め込みコードの案内メールが送られる)
+- 「はい」が得られたら、これまでの会話で確定している知識(FAQ)を整理した全文を、publishツールのknowledge引数に渡して呼ぶ(本番チャットのリンクをお伝えするメールが送られる)
 - 公開は既に一度行っていても、その後ステージ2で内容を追加した場合は、もう一度公開ボタン→確認→publishツールを実行しないと、本番には反映されない(自動反映はされない旨は聞かれたら伝える)
 
 ## FAQ資料の出力
@@ -421,8 +421,14 @@ const SETUP_STAGE_TOOLS_EXTRA = [
   },
   {
     name: "publish",
-    description: "お客様が公開に同意した時に呼ぶ。現在の状態(ステージ1のみ/ステージ1+2)を問わず、公開済みかどうかに関わらず、呼ばれるたびに公開(または再公開)処理を行う。",
-    input_schema: { type: "object", properties: {} },
+    description: "お客様が公開に同意した時に呼ぶ。現在の状態(ステージ1のみ/ステージ1+2)を問わず、公開済みかどうかに関わらず、呼ばれるたびに公開(または再公開)処理を行う。これまでの会話で確定している知識(FAQ)の全文を、本番チャットで使う内容としてそのまま渡すこと。",
+    input_schema: {
+      type: "object",
+      properties: {
+        knowledge: { type: "string", description: "本番チャットで使う、確定済みのFAQ・受け答え知識の全文" },
+      },
+      required: ["knowledge"],
+    },
   },
   {
     name: "export_faq",
@@ -957,7 +963,7 @@ exports.handler = async (event) => {
           if (cfg.record && cfg.record.adminPassword && cfg.record.adminPassword === requestBody.adminPassword) {
             adminBypass = true;
           }
-        } else if ((requestBody.mode === "zoe-setup" || requestBody.mode === "zoe-application") && requestBody.id) {
+        } else if ((requestBody.mode === "zoe-setup" || requestBody.mode === "zoe-application" || requestBody.mode === "zoe-production") && requestBody.id) {
           const cust = await callCustomerAdmin({ action: "adminGet", id: requestBody.id });
           if (cust.record && cust.record.adminPassword && cust.record.adminPassword === requestBody.adminPassword) {
             adminBypass = true;
@@ -973,7 +979,7 @@ exports.handler = async (event) => {
       // 受付Zoe(zoe-chat)だけに適用する。設定Zoe・申込みZoeは、既にID・パスワードで
       // 認証済みの正規のお客様が使うものなので、誤って締め出さないよう短期の
       // レート制限のみとする
-      const applyBlacklist = requestBody.mode === "zoe-chat";
+      const applyBlacklist = requestBody.mode === "zoe-chat" || requestBody.mode === "zoe-production";
       const rateLimitResult = await checkRateLimit(clientIp, applyBlacklist);
       if (!rateLimitResult.allowed) {
         if (rateLimitResult.reason === "blacklisted") {
@@ -1060,6 +1066,20 @@ exports.handler = async (event) => {
     } else if (requestBody.mode === "zoe-application") {
       anthropicRequest.system = await buildApplicationSystemPrompt(requestBody.customerName);
       anthropicRequest.tools = APPLICATION_TOOLS;
+    } else if (requestBody.mode === "zoe-production") {
+      if (!requestBody.id) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "idが指定されていません" }) };
+      }
+      const cust = await callCustomerAdmin({ action: "adminGet", id: requestBody.id });
+      if (!cust.record) {
+        return { statusCode: 404, headers, body: JSON.stringify({ error: "そのチャットは見つかりませんでした" }) };
+      }
+      if (!cust.record.published) {
+        return { statusCode: 200, headers, body: JSON.stringify({ content: [{ type: "text", text: "現在、このチャットはご利用いただけません。" }] }) };
+      }
+      const knowledge = (cust.record.productionKnowledge || "").trim();
+      anthropicRequest.system = `あなたは「${cust.record.chatDisplayName || "Zoe"}」という対話型AIです。${cust.record.customerName || "御社"}の窓口として、以下の知識をもとに、お客様からの質問に丁寧に答えてください。\n\n# 知識\n${knowledge || "(まだ知識が登録されていません)"}\n\n# 制約\n- 分からないことは正直に「分かりかねます」と伝え、担当者への確認を案内する\n- 1回の返信は簡潔に(3〜5文程度)`;
+      anthropicRequest.tools = [];
     } else {
       // 後方互換モード(まだmode対応していない画面用)。今後、他の画面も
       // 同様にサーバー側へロジックを移し、このelse分岐は無くしていく想定
