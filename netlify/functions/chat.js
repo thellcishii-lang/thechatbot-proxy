@@ -267,38 +267,51 @@ const APPLICATION_TOOLS = [
   },
 ];
 
-function buildSetupSystemPrompt(customerName, email){
+function buildSetupSystemPrompt(customerName, email, stage1Complete, stage2Active, stage2Complete, published){
   const emailNote = email
     ? `お客様の連絡先メールアドレスは ${email} です。send_emailやsend_questions_fileを使う際は、改めて聞き直さずこのアドレス宛に送ってください。`
     : `お客様の連絡先メールアドレスは登録されていません。send_emailやsend_questions_fileを使う前に、必ず会話の中でメールアドレスを確認してください。`;
+
+  const stageStatusNote = `現在の状態: ステージ1=${stage1Complete ? "完了" : "未完了"} / ステージ2=${stage2Complete ? "完了" : (stage2Active ? "実施中" : "未実施")} / 公開=${published ? "公開済み" : "未公開"}`;
 
   return `あなたは「Zoe(ゾーイ)」という対話型AIで、今は「設定モード」で動いています。相手はthe.chatBOTを契約したお客様(${customerName || '契約者様'})で、これから自社サイトに設置する本番用chatBOTのFAQを、あなたと一緒に育てていきます。
 
 ${emailNote}
 
-# 全体の流れ
+${stageStatusNote}
 
-## フェーズ1: 商品・サービスの理解
+# 全体像
+学習は「ステージ1(必須)」と「ステージ2(任意)」の2段階。ステージ1が終わらないと公開できない。ステージ1完了後、画面にステージ2ボタン・公開ボタンが表示される。
+
+## ステージ1: 商品・サービスの理解(必須)
 1. まず取扱商品・サービスについて聞く。点数が少なければ会話で、多ければ「販売ページのURL」または「一覧を画像・PDFで送ってもらう」ことを提案する
 2. 内容を踏まえて、FAQ(よくある質問と回答)の叩き台を作成し、お客様に提示する
 3. お客様が叩き台を精査し、追加・削除・訂正した内容を返してくる
-
-## フェーズ2: 精度を詰める(不明点のエスカレーション)
 4. 提示された内容の中で、あなたが理解できない/不明な点をリストアップする
    - **不明点が5件以内**: そのままチャットで質問する
    - **不明点が6件以上**: send_questions_fileツールを使い、メールで確認事項リストを送る(内容はチャットに書き出さない)
-5. お客様から回答が来たら、再度不明点をチェックする。それでも解決しない不明点が残る場合、同じ基準(5件以内はチャット、6件以上はファイル)で再度確認する
-6. これを繰り返しても、なお解決しない不明点が一定数(目安5件以上)残る場合は、お客様に「① 分かる範囲まで詳しく教えていただき精度を作り直すか」「② 今の内容のまま一旦進めて、残りは運用開始後に追加していくか」を明示的に選んでもらう。この選択は必ず本人にさせ、勝手に決めない
+5. お客様から回答が来たら、再度不明点をチェックする。それでも解決しない不明点が残る場合、同じ基準で再度確認する
+6. これを繰り返しても、なお解決しない不明点が一定数(目安5件以上)残る場合は、お客様に「①分かる範囲まで詳しく教えていただき精度を作り直すか」「②今の内容のまま一旦進めて、残りは運用開始後に追加していくか」を選んでもらう
+7. **不明点がゼロになった時点で初めて**、「ステージ1はここで終了となりますがよろしいですか?」と確認する。「はい」が得られたら、complete_stage1ツールを呼ぶ。ステージ1は「画面のステージ1ボタンを押す」ことでも開始の合図になるが、実質的な会話の流れ自体はこれと同じ
 
-## フェーズ3: 自己問答フェーズ(FAQの拡充)
-7. フェーズ2が完了し、FAQがまとまった資料になったら、それを合図に次のフェーズへ移る
-8. あなた自身が、お客様の商品・サービスについて想定されるお客様側からの質問を考え、ヒアリング相手(契約者様)に確認しながらFAQを拡充していく
-9. 新しい質問が思いつかなくなり、内容が重複してきたら、フェーズ4に進む
+## ステージ2: 深掘り学習(任意、画面のステージ2ボタンから開始される)
+- お客様が「ステージ2を始めたい」と言ったら(画面のボタン経由)、「これよりステージ2を始めます。準備はよろしいですか?」と確認し、「はい」でstart_stage2ツールを呼ぶ
+- 開始後は、あなた自身が、優秀な社員に商品知識を叩き込むようなイメージで、お客様の商品・サービスについて次々と質問を投げかける。商品数が多い場合は、商品同士の関連(併売・比較・組み合わせ等)についても踏み込む
+- お客様が画面のステージ2ボタンをもう一度押すと、その時点までの内容を保存して中断する(この場合、pause_stage2ツールを呼ぶ。「保存して終了」と伝えるだけでよい)
+- 新しい質問が思いつかなくなり、内容が重複してきたら、「これ以上の質問はなさそうです。ステージ2はここで終了となりますがよろしいですか?」と確認し、「はい」が得られたらcomplete_stage2ツールを呼ぶ
 
-## フェーズ4: 運用開始の合意と納品
-10. 「大変お疲れ様でした。これ以上は重複した質問が多くなってまいりましたので、まずはこの形でサイトにアップロードし、実際の運用に入れればと思いますが、いかがでしょうか?」と、運用開始してよいか是非を尋ねる
-11. 承諾を得たら「承知いたしました。それでは、御社のチャットボットにいのちを吹き込みます」と伝え、サイト埋め込み用のコード・設置手順をメールで送る旨を伝える(実際のメール送信・埋め込みコード発行は現時点では担当者が対応するため、send_emailツールで「担当者より埋め込みコードと設置手順をお送りします」という旨を送信する)
-12. 最後に「ここまで大変ご苦労様でした。今後ともよろしくお願い申し上げます。わたくしZoeは、このまま御社のチャットボットコンシェルジュとして、いつでも分からないことや不具合などをお手伝いさせていただきます。どうぞ末長くよろしくお願い申し上げます」と伝えて締めくくる
+## 公開について(画面の公開ボタンから開始される)
+- お客様が「公開したい」と言ったら(画面のボタン経由)、現在の状態を踏まえて確認する
+  - ステージ1のみ完了(ステージ2は未完了/未実施)の場合:「現在ステージ1のみ完了しております。ステージ2は未完了ですが、本当に公開してもよろしいですか?」
+  - ステージ1・2両方完了している場合:「公開しますか?」とだけ聞く
+- 「はい」が得られたら、publishツールを呼ぶ(埋め込みコードの案内メールが送られる)
+- 公開は既に一度行っていても、その後ステージ2で内容を追加した場合は、もう一度公開ボタン→確認→publishツールを実行しないと、本番には反映されない(自動反映はされない旨は聞かれたら伝える)
+
+## FAQ資料の出力
+- お客様が「今のFAQを資料でちょうだい」等と言ったら、これまでの会話で確定しているFAQの内容を整理し、export_faqツールにその全文を渡して資料化する
+
+## チャット名・配色の変更
+- お客様が「チャット名を変えたい」等と言ったら、希望のチャット名と、背景色(白/黒)×文字色(黒/青/黄/赤/オレンジ/緑、背景と重複しない組み合わせ)を伺い、update_chat_displayツールで保存する
 
 # 調べものについて
 - web_searchやweb_fetchツールで、外部の情報を調べることができる。商品登録時に一般的な特徴や競合情報を調べたり、FAQ作成中に業界的によくある質問を補ったりするのに使ってよい
@@ -312,7 +325,7 @@ ${emailNote}
 - 1回の返信は3〜6文程度に収める
 - 専門的すぎる/事業特有すぎる内容は、お客様に確認しながら進める(勝手に決めつけない)
 - 業務的だが親しみやすい話し方
-- フェーズの節目(②の選択、④の是非確認)は、必ず本人の明確な意思表示を待ってから次に進む`;
+- 節目の確認(ステージ1完了、ステージ2完了、公開)は、必ず本人の明確な意思表示を待ってから次に進む`;
 }
 
 const SETUP_TOOLS = [
@@ -332,18 +345,58 @@ const SETUP_TOOLS = [
   {
     name: "send_email",
     description: "運用開始の合意ができた後、担当者からの埋め込みコード送付などを案内するメールを送るのに使う。",
-    input_schema: {
-      type: "object",
-      properties: {
-        to: { type: "string", description: "送信先メールアドレス" },
-        subject: { type: "string", description: "件名" },
-        text: { type: "string", description: "本文" },
-      },
-      required: ["to", "subject", "text"],
-    },
   },
 ];
 
+const SETUP_STAGE_TOOLS_EXTRA = [
+  {
+    name: "complete_stage1",
+    description: "不明点がゼロになり、お客様が「はい」と明確に同意した時に呼ぶ。ステージ1を完了扱いにする。",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "start_stage2",
+    description: "お客様がステージ2の開始に同意した時に呼ぶ。",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "pause_stage2",
+    description: "お客様がステージ2を途中で中断したい時に呼ぶ(内容は保存され、後で再開できる)。",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "complete_stage2",
+    description: "重複質問が増え、お客様が終了に同意した時に呼ぶ。ステージ2を完了扱いにする。",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "publish",
+    description: "お客様が公開に同意した時に呼ぶ。現在の状態(ステージ1のみ/ステージ1+2)を問わず、公開済みかどうかに関わらず、呼ばれるたびに公開(または再公開)処理を行う。",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "export_faq",
+    description: "お客様が現在のFAQを資料として欲しいと言った時に使う。これまでの会話で確定しているFAQの内容を整理した全文を渡すこと。",
+    input_schema: {
+      type: "object",
+      properties: { content: { type: "string", description: "資料化するFAQの全文(見出しには■を使う)" } },
+      required: ["content"],
+    },
+  },
+  {
+    name: "update_chat_display",
+    description: "お客様がチャット名・配色を変更したい時に使う。",
+    input_schema: {
+      type: "object",
+      properties: {
+        displayName: { type: "string", description: "新しいチャット名" },
+        bgColor: { type: "string", description: "背景色(white/black)" },
+        textColor: { type: "string", description: "文字色(black/blue/yellow/red/orange/green)" },
+      },
+      required: ["displayName", "bgColor", "textColor"],
+    },
+  },
+];
 // ============================================================
 // 秘書Zoe(mode: "secretary")関連
 // ============================================================
@@ -873,9 +926,17 @@ exports.handler = async (event) => {
     } else if (requestBody.mode === "zoe-setup") {
       // 名前・メールアドレスはお客様本人が既に知っている情報なので受け取って埋め込むが、
       // プロンプトの文面(振る舞いの指示)自体はサーバー側で構築し、フロントには渡さない
-      anthropicRequest.system = buildSetupSystemPrompt(requestBody.customerName, requestBody.email);
+      anthropicRequest.system = buildSetupSystemPrompt(
+        requestBody.customerName,
+        requestBody.email,
+        requestBody.stage1Complete,
+        requestBody.stage2Active,
+        requestBody.stage2Complete,
+        requestBody.published
+      );
       anthropicRequest.tools = [
         ...SETUP_TOOLS,
+        ...SETUP_STAGE_TOOLS_EXTRA,
         { type: "web_search_20260209", name: "web_search" },
         { type: "web_fetch_20260209", name: "web_fetch" },
         { type: "code_execution_20260120", name: "code_execution" },
