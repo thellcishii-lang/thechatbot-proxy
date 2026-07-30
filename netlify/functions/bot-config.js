@@ -13,6 +13,15 @@
 
 const { getStore } = require("@netlify/blobs");
 
+function generatePassword() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let pw = "";
+  for (let i = 0; i < 8; i++) {
+    pw += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return pw;
+}
+
 function checkSecret(req) {
   return process.env.INTERNAL_FUNCTION_SECRET && req.secret === process.env.INTERNAL_FUNCTION_SECRET;
 }
@@ -113,6 +122,19 @@ exports.handler = async (event) => {
       const updated = { ...existing, systemPrompt: "", updatedAt: new Date().toISOString() };
       await store.setJSON(req.botId, updated);
       return { statusCode: 200, headers, body: JSON.stringify({ reset: true }) };
+    }
+
+    // admin用パスワードの発行(秘書Zoe専用、内部シークレット必須)。
+    // 発行されたパスワードでアクセスすると、そのbotIdへのアクセスはブラックリスト集計の対象外になる
+    if (req.action === "generateAdminPassword") {
+      if (!req.botId) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "botIdが指定されていません" }) };
+      }
+      const existing = (await store.get(req.botId, { type: "json" })) || { botId: req.botId };
+      const adminPassword = generatePassword();
+      const updated = { ...existing, adminPassword };
+      await store.setJSON(req.botId, updated);
+      return { statusCode: 200, headers, body: JSON.stringify({ adminPassword }) };
     }
 
     return { statusCode: 400, headers, body: JSON.stringify({ error: "不明なactionです" }) };
