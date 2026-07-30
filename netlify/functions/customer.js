@@ -350,6 +350,27 @@ exports.handler = async (event) => {
       return { statusCode: 200, headers, body: JSON.stringify({ deleted: true, count: deletedCount }) };
     }
 
+    // ⑬ admin用パスワードの発行。本人(id+password一致)、または秘書Zoe(内部シークレット)の
+    //   どちらかで実行できる。発行されたパスワードでアクセスすると、ブラックリスト集計の対象外になる
+    if (req.action === "generateAdminPassword") {
+      if (!req.id) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "idが指定されていません" }) };
+      }
+      const record = await store.get(req.id, { type: "json" });
+      if (!record) {
+        return { statusCode: 404, headers, body: JSON.stringify({ error: "そのIDは存在しません" }) };
+      }
+      const authorizedBySecret = process.env.INTERNAL_FUNCTION_SECRET && req.secret === process.env.INTERNAL_FUNCTION_SECRET;
+      const authorizedByPassword = req.password && req.password === record.password;
+      if (!authorizedBySecret && !authorizedByPassword) {
+        return { statusCode: 401, headers, body: JSON.stringify({ error: "許可されていません" }) };
+      }
+      const adminPassword = generatePassword();
+      const updated = { ...record, adminPassword };
+      await store.setJSON(req.id, updated);
+      return { statusCode: 200, headers, body: JSON.stringify({ adminPassword }) };
+    }
+
     return { statusCode: 400, headers, body: JSON.stringify({ error: "不明なactionです" }) };
   } catch (err) {
     return { statusCode: 500, headers, body: JSON.stringify({ error: "内部エラー: " + err.message }) };
