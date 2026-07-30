@@ -243,8 +243,7 @@ const SALES_TOOLS = [
   },
 ];
 
-function buildApplicationSystemPrompt(customerName){
-  return `あなたは「Zoe(ゾーイ)」という対話型AIで、今は「申込みサポートモード」で動いています。相手はthe.chatBOTへのお申込み手続き中のお客様(${customerName || 'お客様'})で、まだご決済が完了していません。
+const APPLICATION_PROMPT_TEMPLATE = `あなたは「Zoe(ゾーイ)」という対話型AIで、今は「申込みサポートモード」で動いています。相手はthe.chatBOTへのお申込み手続き中のお客様({{customerName}})で、まだご決済が完了していません。
 
 # 前提
 申込み内容の確認と、正式なお申込みの確定は、画面上のボタン操作(「この内容で申し込む」)で既に完結しています。あなたが呼ばれるのは、その後の追加の質問や会話に対応する場面です。
@@ -257,6 +256,10 @@ function buildApplicationSystemPrompt(customerName){
 # トーンと制約
 - 丁寧で簡潔な話し方(1回の返信は3〜4文程度)
 - お客様に不安を与えないよう、落ち着いたトーンを保つ`;
+
+async function buildApplicationSystemPrompt(customerName){
+  const template = await getEffectiveTemplate("Zoe001-application", APPLICATION_PROMPT_TEMPLATE);
+  return template.replace(/\{\{customerName\}\}/g, customerName || 'お客様');
 }
 
 const APPLICATION_TOOLS = [
@@ -267,18 +270,11 @@ const APPLICATION_TOOLS = [
   },
 ];
 
-function buildSetupSystemPrompt(customerName, email, stage1Complete, stage2Active, stage2Complete, published){
-  const emailNote = email
-    ? `お客様の連絡先メールアドレスは ${email} です。send_emailやsend_questions_fileを使う際は、改めて聞き直さずこのアドレス宛に送ってください。`
-    : `お客様の連絡先メールアドレスは登録されていません。send_emailやsend_questions_fileを使う前に、必ず会話の中でメールアドレスを確認してください。`;
+const SETUP_PROMPT_TEMPLATE = `あなたは「Zoe(ゾーイ)」という対話型AIで、今は「設定モード」で動いています。相手はthe.chatBOTを契約したお客様({{customerName}})で、これから自社サイトに設置する本番用chatBOTのFAQを、あなたと一緒に育てていきます。
 
-  const stageStatusNote = `現在の状態: ステージ1=${stage1Complete ? "完了" : "未完了"} / ステージ2=${stage2Complete ? "完了" : (stage2Active ? "実施中" : "未実施")} / 公開=${published ? "公開済み" : "未公開"}`;
+{{emailNote}}
 
-  return `あなたは「Zoe(ゾーイ)」という対話型AIで、今は「設定モード」で動いています。相手はthe.chatBOTを契約したお客様(${customerName || '契約者様'})で、これから自社サイトに設置する本番用chatBOTのFAQを、あなたと一緒に育てていきます。
-
-${emailNote}
-
-${stageStatusNote}
+{{stageStatusNote}}
 
 # 全体像
 学習は「ステージ1(必須)」と「ステージ2(任意)」の2段階。ステージ1が終わらないと公開できない。ステージ1完了後、画面にステージ2ボタン・公開ボタンが表示される。
@@ -343,6 +339,31 @@ ${stageStatusNote}
 - 専門的すぎる/事業特有すぎる内容は、お客様に確認しながら進める(勝手に決めつけない)
 - 業務的だが親しみやすい話し方
 - 節目の確認(ステージ1完了、ステージ2完了、公開)は、必ず本人の明確な意思表示を待ってから次に進む`;
+
+async function getEffectiveTemplate(botId, fallbackTemplate) {
+  try {
+    const data = await callBotConfig({ action: "get", botId });
+    if (data.record && data.record.systemPrompt && data.record.systemPrompt.trim()) {
+      return data.record.systemPrompt;
+    }
+  } catch (e) {
+    // 取得に失敗した場合は、安全のためコード側のテンプレートを使う
+  }
+  return fallbackTemplate;
+}
+
+async function buildSetupSystemPrompt(customerName, email, stage1Complete, stage2Active, stage2Complete, published){
+  const emailNote = email
+    ? `お客様の連絡先メールアドレスは ${email} です。send_emailやsend_questions_fileを使う際は、改めて聞き直さずこのアドレス宛に送ってください。`
+    : `お客様の連絡先メールアドレスは登録されていません。send_emailやsend_questions_fileを使う前に、必ず会話の中でメールアドレスを確認してください。`;
+
+  const stageStatusNote = `現在の状態: ステージ1=${stage1Complete ? "完了" : "未完了"} / ステージ2=${stage2Complete ? "完了" : (stage2Active ? "実施中" : "未実施")} / 公開=${published ? "公開済み" : "未公開"}`;
+
+  const template = await getEffectiveTemplate("Zoe001-setup", SETUP_PROMPT_TEMPLATE);
+  return template
+    .replace(/\{\{customerName\}\}/g, customerName || '契約者様')
+    .replace(/\{\{emailNote\}\}/g, emailNote)
+    .replace(/\{\{stageStatusNote\}\}/g, stageStatusNote);
 }
 
 const SETUP_TOOLS = [
@@ -425,7 +446,8 @@ const SETUP_STAGE_TOOLS_EXTRA = [
 const SECRETARY_SYSTEM_PROMPT = `あなたは「秘書Zoe」です。the合同会社が運営する複数の事業(the.chatBOT=Zoe001、今後追加されるPicoPay等)の設定を、会話だけで管理するための、社内専用のアシスタントです。話し相手は運営者本人だけです。
 
 # できること
-1. 「Zoe001教育モード」のように言われたら、get_bot_configツールでそのbotIdの現在のシステムプロンプトを取得し、内容を要約して見せる。その後、運営者との会話の中で、どう変更したいかをヒアリングし、変更後の完全なシステムプロンプト案を組み立てていく。「今のままで良い」「変更なし」と言われた場合は、必ずconfirm_no_changeツールを使うこと(set_bot_configで全文を書き直す必要はなく、そちらの方が速く確実)
+1. 「Zoe001教育モード」のように言われたら、get_bot_configツールでそのbotIdの現在のシステムプロンプトを取得し、内容を要約して見せる。その後、運営者との会話の中で、どう変更したいかをヒアリングし、変更後の完全なシステムプロンプト案を組み立てていく。「今のままで良い」「変更なし」と言われた場合は、必ずconfirm_no_changeツールを使うこと(set_bot_configで全文を書き直す必要はなく、そちらの方が速く確実)。管理対象のbotIdは「Zoe001」(受付Zoe)だけでなく、「Zoe001-setup」(設定Zoe)、「Zoe001-application」(申込みZoe)も含む。「設定Zoeの〇〇はどうなってる?」のように聞かれたら、Zoe001-setupのことだと理解して対応する
+1a. これらのプロンプトには、会社名やお客様の状況など、その場で変わる部分に{{customerName}}のような二重中括弧の目印(プレースホルダー)が使われている。編集する際は、この目印を絶対に消したり書き換えたりせず、そのまま残すこと。運営者が「会社名の後にお客様と付けて」のような指示をした場合も、目印自体はそのまま残しつつ、その前後の文言だけを調整する
 2. 「Zoe001教育モード終了」と言われたら、「保存しますか?」と確認する。「保存」と言われたら、それまでの会話で合意した完全なシステムプロンプトの内容で、set_bot_configツールを呼んで保存する。保存しない場合は、そのまま変更を破棄して通常モードに戻る
 3. 「管理Zoe登録」と言われたら、割り当てたいリポジトリ名を尋ね、register_botツールで次の空き番号(Zoe002等)を発行する
 4. 6桁のお客様IDを伝えられたら、get_customer_infoツールでそのお客様の情報(会社名・連絡先・ステータス・支払い状況等)を取得して分かりやすく伝える
@@ -627,6 +649,12 @@ async function getEffectiveBotPrompt(botId) {
   if (botId === "Zoe001") {
     return SALES_SYSTEM_PROMPT;
   }
+  if (botId === "Zoe001-setup") {
+    return SETUP_PROMPT_TEMPLATE;
+  }
+  if (botId === "Zoe001-application") {
+    return APPLICATION_PROMPT_TEMPLATE;
+  }
   return null;
 }
 
@@ -655,7 +683,7 @@ async function executeSecretaryTool(name, input, requesterIp) {
       if (prompt === null) {
         return JSON.stringify({ record: { botId: input.botId, systemPrompt: "", note: "未登録またはまだ何も設定されていません" } });
       }
-      const isDefault = input.botId === "Zoe001" && prompt === SALES_SYSTEM_PROMPT;
+      const isDefault = ["Zoe001", "Zoe001-setup", "Zoe001-application"].includes(input.botId) && prompt === (input.botId === "Zoe001" ? SALES_SYSTEM_PROMPT : (input.botId === "Zoe001-setup" ? SETUP_PROMPT_TEMPLATE : APPLICATION_PROMPT_TEMPLATE));
       return JSON.stringify({
         record: { botId: input.botId, systemPrompt: prompt },
         note: isDefault ? "これは現在実際に動いている初期設定です(まだ秘書Zoe経由では編集されていません)" : undefined,
@@ -943,7 +971,7 @@ exports.handler = async (event) => {
     } else if (requestBody.mode === "zoe-setup") {
       // 名前・メールアドレスはお客様本人が既に知っている情報なので受け取って埋め込むが、
       // プロンプトの文面(振る舞いの指示)自体はサーバー側で構築し、フロントには渡さない
-      anthropicRequest.system = buildSetupSystemPrompt(
+      anthropicRequest.system = await buildSetupSystemPrompt(
         requestBody.customerName,
         requestBody.email,
         requestBody.stage1Complete,
@@ -959,7 +987,7 @@ exports.handler = async (event) => {
         { type: "code_execution_20260120", name: "code_execution" },
       ];
     } else if (requestBody.mode === "zoe-application") {
-      anthropicRequest.system = buildApplicationSystemPrompt(requestBody.customerName);
+      anthropicRequest.system = await buildApplicationSystemPrompt(requestBody.customerName);
       anthropicRequest.tools = APPLICATION_TOOLS;
     } else {
       // 後方互換モード(まだmode対応していない画面用)。今後、他の画面も
