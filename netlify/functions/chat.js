@@ -33,7 +33,7 @@ function getClientIp(event) {
   );
 }
 
-async function checkRateLimit(ip) {
+async function checkRateLimit(ip, applyBlacklist) {
   try {
     const store = getStore({
       name: "rate-limit-chat",
@@ -44,13 +44,13 @@ async function checkRateLimit(ip) {
     const SHORT_WINDOW_MS = 5 * 60 * 1000;   // 5分間
     const SHORT_LIMIT = 20;                  // 5分間に20回まで
     const DAY_WINDOW_MS = 24 * 60 * 60 * 1000; // 1日
-    const DAY_LIMIT = 50;                    // 1日に50回まで。超えたら永久ブラックリスト入り
+    const DAY_LIMIT = 50;                    // 1日に50回まで。超えたら永久ブラックリスト入り(applyBlacklistがtrueの場合のみ)
 
     const now = Date.now();
     const record = (await store.get(ip, { type: "json" })) || {};
 
-    // 一度ブラックリスト入りしたら、期限なくずっと拒否する
-    if (record.blacklisted) {
+    // 一度ブラックリスト入りしたら、期限なくずっと拒否する(ブラックリスト対象の呼び出し元のみ)
+    if (applyBlacklist && record.blacklisted) {
       return { allowed: false, reason: "blacklisted" };
     }
 
@@ -72,10 +72,10 @@ async function checkRateLimit(ip) {
     }
     dayCount++;
 
-    // 1日50回を超えたら、恒久的にブラックリスト入り
-    const blacklisted = dayCount > DAY_LIMIT;
+    // 1日50回を超えたら、恒久的にブラックリスト入り(ブラックリスト対象の呼び出し元のみ)
+    const blacklisted = applyBlacklist && dayCount > DAY_LIMIT;
 
-    await store.setJSON(ip, { shortStart, shortCount, dayStart, dayCount, blacklisted });
+    await store.setJSON(ip, { shortStart, shortCount, dayStart, dayCount, blacklisted: !!(record.blacklisted || blacklisted) });
 
     if (blacklisted) return { allowed: false, reason: "blacklisted" };
     if (shortCount > SHORT_LIMIT) return { allowed: false, reason: "rate_limited" };
@@ -326,6 +326,9 @@ const SETUP_PROMPT_TEMPLATE = `あなたは「Zoe(ゾーイ)」という対話�
 ## チャット名・配色の変更
 - お客様が「チャット名を変えたい」等と言ったら、希望のチャット名と、背景色(白/黒)×文字色(黒/青/黄/赤/オレンジ/緑、背景と重複しない組み合わせ)を伺い、update_chat_displayツールで保存する
 
+## adminパスワードについて
+- お客様が「adminパスワードをください」「テスト用のパスワードが欲しい」等と言ったら、issue_my_admin_passwordツールを呼び、発行されたパスワードを伝える。あわせて「本番チャットのURLの末尾に ?admin=(発行されたパスワード) を付けてアクセスいただくと、テスト目的でのご利用がアクセス制限の集計対象外になります」と説明する
+
 # 調べものについて
 - web_searchやweb_fetchツールで、外部の情報を調べることができる。商品登録時に一般的な特徴や競合情報を調べたり、FAQ作成中に業界的によくある質問を補ったりするのに使ってよい
 - code_executionツールで、簡単な集計・データ整理もその場で行える
@@ -442,6 +445,11 @@ const SETUP_STAGE_TOOLS_EXTRA = [
       },
       required: ["displayName", "bgColor", "textColor"],
     },
+  },
+  {
+    name: "issue_my_admin_password",
+    description: "お客様が「adminパスワードをください」「テスト用のパスワードが欲しい」等と言った場合に使う。ご自身の本番チャットをテストする際、アクセス制限にかからないようにするための合言葉を発行する。",
+    input_schema: { type: "object", properties: {} },
   },
 ];
 // ============================================================
@@ -591,6 +599,15 @@ const SECRETARY_TOOLS = [
     name: "unblock_this_ip",
     description: "運営者が「サイトのチャットもブロック解除して」「自分のIPのブロックを解除して」等と言った場合に使う。今この会話をしている運営者自身のIPアドレスにかかった、zoe-chat等の公開チャット向けのブロック(ブラックリスト)を解除する。",
     input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "issue_admin_password",
+    description: "運営者が「(botIdまたは6桁ID)のadminパスワード発行して」と言った場合に使う。発行されたパスワードでチャットURLに?admin=パスワードを付けてアクセスすると、そのアクセスはブラックリスト集計の対象外になる。targetがZoeで始まる場合はbot(受付Zoe等)、6桁の数字の場合はお客様のIDとして扱う。",
+    input_schema: {
+      type: "object",
+      properties: { target: { type: "string", description: "例: Zoe001、または6桁のお客様ID" } },
+      required: ["target"],
+    },
   },
   {
     name: "memory_list",
@@ -762,6 +779,24 @@ async function executeSecretaryTool(name, input, requesterIp) {
         return "解除中にエラーが発生しました: " + e.message;
       }
     }
+    if (name === "issue_admin_password") {
+      const target = input.target;
+      try {
+        if (/^\d{6}$/.test(target)) {
+          const data = await callCustomerAdmin({ action: "generateAdminPassword", id: target });
+          return data.adminPassword
+            ? `お客様ID ${target} のadminパスワード: ${data.adminPassword}(URLに ?admin=${data.adminPassword} を付けてアクセスするとブラックリスト対象外になります)`
+            : "発行に失敗しました: " + (data.error || "不明なエラー");
+        } else {
+          const data = await callBotConfig({ action: "generateAdminPassword", botId: target });
+          return data.adminPassword
+            ? `${target} のadminパスワード: ${data.adminPassword}(URLに ?admin=${data.adminPassword} を付けてアクセスするとブラックリスト対象外になります)`
+            : "発行に失敗しました: " + (data.error || "不明なエラー");
+        }
+      } catch (e) {
+        return "発行中にエラーが発生しました: " + e.message;
+      }
+    }
     if (name === "memory_list") {
       const data = await callSecretaryMemory({ action: "list" });
       return JSON.stringify(data);
@@ -913,20 +948,47 @@ exports.handler = async (event) => {
   // 秘書Zoe(mode:secretary)は、Face ID認証という別の強固な保護があるため、
   // 誰でもアクセスできる公開画面向けのIPレート制限の対象外とする
   if (requestBody.mode !== "secretary") {
-    const rateLimitResult = await checkRateLimit(clientIp);
-    if (!rateLimitResult.allowed) {
-      if (rateLimitResult.reason === "blacklisted") {
+    // adminパスワードが渡され、かつ正しく一致する場合は、レート制限自体を丸ごとスキップする
+    let adminBypass = false;
+    if (requestBody.adminPassword) {
+      try {
+        if (requestBody.mode === "zoe-chat") {
+          const cfg = await callBotConfig({ action: "get", botId: "Zoe001" });
+          if (cfg.record && cfg.record.adminPassword && cfg.record.adminPassword === requestBody.adminPassword) {
+            adminBypass = true;
+          }
+        } else if ((requestBody.mode === "zoe-setup" || requestBody.mode === "zoe-application") && requestBody.id) {
+          const cust = await callCustomerAdmin({ action: "adminGet", id: requestBody.id });
+          if (cust.record && cust.record.adminPassword && cust.record.adminPassword === requestBody.adminPassword) {
+            adminBypass = true;
+          }
+        }
+      } catch (e) {
+        // 確認に失敗した場合は、安全側に倒して通常のレート制限を適用する
+      }
+    }
+
+    if (!adminBypass) {
+      // ブラックリスト(1日50回超で永久ブロック)は、ID認証を経ない完全公開の
+      // 受付Zoe(zoe-chat)だけに適用する。設定Zoe・申込みZoeは、既にID・パスワードで
+      // 認証済みの正規のお客様が使うものなので、誤って締め出さないよう短期の
+      // レート制限のみとする
+      const applyBlacklist = requestBody.mode === "zoe-chat";
+      const rateLimitResult = await checkRateLimit(clientIp, applyBlacklist);
+      if (!rateLimitResult.allowed) {
+        if (rateLimitResult.reason === "blacklisted") {
+          return {
+            statusCode: 403,
+            headers,
+            body: JSON.stringify({ error: "このIPアドレスは、不審なアクセスが検知されたため利用を制限しています。" }),
+          };
+        }
         return {
-          statusCode: 403,
+          statusCode: 429,
           headers,
-          body: JSON.stringify({ error: "このIPアドレスは、不審なアクセスが検知されたため利用を制限しています。" }),
+          body: JSON.stringify({ error: "リクエストが多すぎます。しばらくしてから再度お試しください。" }),
         };
       }
-      return {
-        statusCode: 429,
-        headers,
-        body: JSON.stringify({ error: "リクエストが多すぎます。しばらくしてから再度お試しください。" }),
-      };
     }
   }
 
