@@ -477,7 +477,7 @@ const SECRETARY_SYSTEM_PROMPT = `あなたは「秘書Zoe」です。the合同�
 5. 「(6桁ID)を停止して」「再開して」と言われたら、set_customer_suspendedツールで停止/再開を行う
 6. list_botsツールで、登録済みのZoe一覧を確認できる
 7. 「お客様一覧」「6桁IDを取った人の一覧」のように言われたら、list_customersツールで全顧客(会社名・ステータス・支払い状況等)の一覧を取得して分かりやすく伝える
-7a. 「(会社名)のadminパスワード発行して」のように、6桁IDではなく会社名で言われたら、issue_admin_passwordにその会社名をそのまま渡さず、まずlist_customersツールで顧客一覧を取得し、該当する会社名の6桁IDを見つけてから、そのIDでissue_admin_passwordを呼ぶこと
+7a. 「(会社名)のadminパスワード発行して」のように、6桁IDではなく会社名で言われたら、その会社名の文字列をそのままissue_admin_passwordのtargetに渡してよい(名前解決はツール内部で行われる)
 8. 「アクセス数」「チャットに入ってきた数」「今日の実績」のように言われたら、get_analyticsツールで指定されたbotId(未指定ならZoe001)・日付(未指定なら今日)のサイトアクセス数・チャット開始数を取得して伝える
 9. 運営者がコード側の初期設定を直接更新した後、「Zoe001をリセットして」のように言われたら、reset_bot_configツールで保存済みの設定を削除し、コード側の最新デフォルトに戻す
 10. 「(6桁ID)を削除して」と言われたら、必ず「本当に削除してよろしいですか?元に戻せません」と一度確認してから、delete_customerツールで削除する
@@ -609,7 +609,7 @@ const SECRETARY_TOOLS = [
   },
   {
     name: "issue_admin_password",
-    description: "運営者が「(botIdまたは6桁ID)のadminパスワード発行して」と言った場合に使う。発行されたパスワードは、チャットに「admin」と入力してから聞かれた時に入力する形(受付Zoe・本番チャット)、または設定Zoeのログイン画面でID+このパスワードを入力する形(設定Zoe)で使う。有効なtargetは、6桁のお客様ID、またはZoe001(受付Zoe)のみ。",
+    description: "運営者が「(会社名/botId/6桁ID)のadminパスワード発行して」と言った場合に使う。発行されたパスワードは、チャットに「admin」と入力してから聞かれた時に入力する形(受付Zoe・本番チャット)、または設定Zoeのログイン画面でID+このパスワードを入力する形(設定Zoe)で使う。targetには、6桁のお客様ID・Zoe001(受付Zoe)・会社名のいずれを渡してもよい(会社名の場合はツール内部で該当する顧客を探す)。",
     input_schema: {
       type: "object",
       properties: { target: { type: "string", description: "例: Zoe001、または6桁のお客様ID" } },
@@ -800,7 +800,18 @@ async function executeSecretaryTool(name, input, requesterIp) {
             ? `${target} のadminパスワード: ${data.adminPassword}\n\n使い方: 受付Zoeのチャットに「admin」と入力→パスワードを聞かれたらこのパスワードを入力してください`
             : "発行に失敗しました: " + (data.error || "不明なエラー");
         } else {
-          return `${target} には、adminパスワードの仕組みが繋がっていません。発行できるのは、6桁のお客様ID、またはZoe001(受付Zoe)だけです。`;
+          // 6桁IDでもZoe001でもない場合、会社名として扱い、この中で顧客一覧から
+          // 該当する6桁IDを探して、そのまま発行まで一度に済ませる(往復を増やしてタイムアウトしないため)
+          const listData = await callCustomerAdmin({ action: "adminList" });
+          const records = listData.records || [];
+          const match = records.find((r) => r.customerName && r.customerName.includes(target));
+          if (!match) {
+            return `「${target}」という会社名の顧客が見つかりませんでした。list_customersで一覧を確認してみてください。`;
+          }
+          const data = await callCustomerAdmin({ action: "generateAdminPassword", id: match.id });
+          return data.adminPassword
+            ? `${match.customerName}様(ID: ${match.id})のadminパスワード: ${data.adminPassword}\n\n使い方:\n・設定Zoeのログイン画面に、このIDとこのパスワードを入力するとadminとして入れます(お客様自身の設定は上書きされません)\n・本番チャットでは、チャットに「admin」と入力→パスワードを聞かれたらこのパスワードを入力、で使えます`
+            : "発行に失敗しました: " + (data.error || "不明なエラー");
         }
       } catch (e) {
         return "発行中にエラーが発生しました: " + e.message;
