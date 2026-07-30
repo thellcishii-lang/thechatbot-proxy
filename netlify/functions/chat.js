@@ -300,6 +300,10 @@ ${emailNote}
 11. 承諾を得たら「承知いたしました。それでは、御社のチャットボットにいのちを吹き込みます」と伝え、サイト埋め込み用のコード・設置手順をメールで送る旨を伝える(実際のメール送信・埋め込みコード発行は現時点では担当者が対応するため、send_emailツールで「担当者より埋め込みコードと設置手順をお送りします」という旨を送信する)
 12. 最後に「ここまで大変ご苦労様でした。今後ともよろしくお願い申し上げます。わたくしZoeは、このまま御社のチャットボットコンシェルジュとして、いつでも分からないことや不具合などをお手伝いさせていただきます。どうぞ末長くよろしくお願い申し上げます」と伝えて締めくくる
 
+# 調べものについて
+- web_searchやweb_fetchツールで、外部の情報を調べることができる。商品登録時に一般的な特徴や競合情報を調べたり、FAQ作成中に業界的によくある質問を補ったりするのに使ってよい
+- code_executionツールで、簡単な集計・データ整理もその場で行える
+
 # ファイル添付について
 - お客様は画像やPDF(商品リスト、カタログ、マニュアルなど)を直接送ってくることがある。内容をよく読み取り、そこから読み取れる商品名・仕様・価格などを踏まえてFAQの叩き台に反映する
 - 添付内容だけでは分からない部分は、遠慮なく質問する
@@ -367,6 +371,7 @@ const SECRETARY_SYSTEM_PROMPT = `あなたは「秘書Zoe」です。the合同�
 13. 画像やPDFが送られてきた場合、その内容を読み取って回答に活かす
 14. お客様一覧やアクセス数などのデータを見せる時は、読みやすいMarkdownの表(| 列 | 列 |の形式)で出すこと。生のJSONをそのまま貼り付けない
 15. code_executionツールで、集計・計算・簡単なデータ処理をその場で行える
+16. 記憶(メモ)機能を持っている。会話の最初に見せられる一覧(下記)を踏まえ、重要な話が出たら聞かれなくても適切なファイルに書き留めてよい。「〇〇フォルダ作って、これ入れておいて」と言われたらmemory_write/memory_appendで保存し、「〇〇フォルダ見せて」と言われたらmemory_readで中身を見せる。ファイルパスは/areas/〇〇.mdのような形式にする
 
 # トーンと制約
 - 簡潔で、業務的だが丁寧な話し方
@@ -486,6 +491,44 @@ const SECRETARY_TOOLS = [
     description: "運営者が「サイトのチャットもブロック解除して」「自分のIPのブロックを解除して」等と言った場合に使う。今この会話をしている運営者自身のIPアドレスにかかった、zoe-chat等の公開チャット向けのブロック(ブラックリスト)を解除する。",
     input_schema: { type: "object", properties: {} },
   },
+  {
+    name: "memory_list",
+    description: "保存されている記憶(メモ)のファイル一覧を取得する。会話の最初に自動で見せているが、必要なら随時呼び出してよい。",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "memory_read",
+    description: "指定したパスの記憶(メモ)の中身を読む。",
+    input_schema: {
+      type: "object",
+      properties: { path: { type: "string", description: "例: /areas/秘書Zoe改善.md" } },
+      required: ["path"],
+    },
+  },
+  {
+    name: "memory_write",
+    description: "指定したパスに、記憶(メモ)を新規作成、または全文を書き換えて保存する。",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "例: /areas/秘書Zoe改善.md" },
+        content: { type: "string", description: "保存する内容(全文)" },
+      },
+      required: ["path", "content"],
+    },
+  },
+  {
+    name: "memory_append",
+    description: "指定したパスの記憶(メモ)の末尾に、新しい内容を追記する。ファイルがまだ無ければ新規作成する。",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "例: /areas/秘書Zoe改善.md" },
+        content: { type: "string", description: "追記する内容" },
+      },
+      required: ["path", "content"],
+    },
+  },
 ];
 
 async function callBotConfig(body) {
@@ -519,6 +562,15 @@ async function getEffectiveBotPrompt(botId) {
 
 async function callTrackEvent(body) {
   const res = await fetch("https://chatbot-proxy.netlify.app/.netlify/functions/track-event", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...body, secret: process.env.INTERNAL_FUNCTION_SECRET }),
+  });
+  return await res.json();
+}
+
+async function callSecretaryMemory(body) {
+  const res = await fetch("https://chatbot-proxy.netlify.app/.netlify/functions/secretary-memory", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...body, secret: process.env.INTERNAL_FUNCTION_SECRET }),
@@ -603,6 +655,22 @@ async function executeSecretaryTool(name, input, requesterIp) {
         return "解除中にエラーが発生しました: " + e.message;
       }
     }
+    if (name === "memory_list") {
+      const data = await callSecretaryMemory({ action: "list" });
+      return JSON.stringify(data);
+    }
+    if (name === "memory_read") {
+      const data = await callSecretaryMemory({ action: "read", path: input.path });
+      return JSON.stringify(data);
+    }
+    if (name === "memory_write") {
+      const data = await callSecretaryMemory({ action: "write", path: input.path, content: input.content });
+      return data.saved ? `${input.path} に保存しました。` : "保存に失敗しました: " + (data.error || "不明なエラー");
+    }
+    if (name === "memory_append") {
+      const data = await callSecretaryMemory({ action: "append", path: input.path, content: input.content });
+      return data.saved ? `${input.path} に追記しました。` : "追記に失敗しました: " + (data.error || "不明なエラー");
+    }
     return "不明なツールです";
   } catch (e) {
     return "ツール実行中にエラーが発生しました: " + e.message;
@@ -648,6 +716,21 @@ async function runSecretaryAgent(messages, requesterIp) {
   let currentMessages = messages.slice();
   const collectedImages = [];
 
+  // 会話の最初に、今どんな記憶(メモ)が保存されているかを取得し、システムプロンプトに含めておく。
+  // これにより、聞かれなくても秘書Zoe自身が「このファイルに書けばいい」と判断できるようになる。
+  let memoryListingText = "(取得できませんでした)";
+  try {
+    const listData = await callSecretaryMemory({ action: "list" });
+    if (listData.items) {
+      memoryListingText = listData.items.length
+        ? listData.items.map((it) => `- ${it.path} — ${it.preview}`).join("\n")
+        : "(まだ何も保存されていません)";
+    }
+  } catch (e) {
+    // 取得に失敗しても、通常の会話は続行する
+  }
+  const systemPromptWithMemory = SECRETARY_SYSTEM_PROMPT + `\n\n# 現在保存されている記憶(メモ)一覧\n${memoryListingText}`;
+
   for (let i = 0; i < 8; i++) { // 無限ループ防止のため上限を設ける
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -657,9 +740,9 @@ async function runSecretaryAgent(messages, requesterIp) {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6",
+        model: "claude-sonnet-5",
         max_tokens: 1500,
-        system: SECRETARY_SYSTEM_PROMPT,
+        system: systemPromptWithMemory,
         messages: currentMessages,
         tools: [
           ...SECRETARY_TOOLS,
@@ -791,7 +874,12 @@ exports.handler = async (event) => {
       // 名前・メールアドレスはお客様本人が既に知っている情報なので受け取って埋め込むが、
       // プロンプトの文面(振る舞いの指示)自体はサーバー側で構築し、フロントには渡さない
       anthropicRequest.system = buildSetupSystemPrompt(requestBody.customerName, requestBody.email);
-      anthropicRequest.tools = SETUP_TOOLS;
+      anthropicRequest.tools = [
+        ...SETUP_TOOLS,
+        { type: "web_search_20260209", name: "web_search" },
+        { type: "web_fetch_20260209", name: "web_fetch" },
+        { type: "code_execution_20260120", name: "code_execution" },
+      ];
     } else if (requestBody.mode === "zoe-application") {
       anthropicRequest.system = buildApplicationSystemPrompt(requestBody.customerName);
       anthropicRequest.tools = APPLICATION_TOOLS;
