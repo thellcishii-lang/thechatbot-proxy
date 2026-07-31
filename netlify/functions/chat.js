@@ -206,6 +206,39 @@ async function callAnthropicWithTopicTracking(anthropicRequest, apiKey, clientIp
   };
 }
 
+// ============================================================
+// 共通IP不正利用トラッカー(全Function共通、ストア名"ip-abuse-tracker")
+// ============================================================
+async function checkIpAbuse(ip) {
+  try {
+    const store = getStore({
+      name: "ip-abuse-tracker",
+      siteID: process.env.NETLIFY_SITE_ID,
+      token: process.env.NETLIFY_API_TOKEN,
+    });
+    const record = await store.get(ip, { type: "json" });
+    return !!(record && record.blacklisted);
+  } catch (e) {
+    return false;
+  }
+}
+
+async function recordIpAbuseStrike(ip) {
+  try {
+    const store = getStore({
+      name: "ip-abuse-tracker",
+      siteID: process.env.NETLIFY_SITE_ID,
+      token: process.env.NETLIFY_API_TOKEN,
+    });
+    const record = (await store.get(ip, { type: "json" })) || {};
+    const strikes = (record.strikes || 0) + 1;
+    const blacklisted = strikes >= 3;
+    await store.setJSON(ip, { ...record, strikes, blacklisted });
+  } catch (e) {
+    // 記録に失敗しても本来の処理は止めない
+  }
+}
+
 const SALES_SYSTEM_PROMPT = `あなたは「Zoe(ゾーイ)」という、the.chatBOTが開発した対話型AIです。親しみやすく、簡潔に、日本語で会話してください。
 
 # あなた(Zoe)について
@@ -641,6 +674,7 @@ const SECRETARY_SYSTEM_PROMPT = `あなたは「秘書Zoe」です。the合同�
 16. 記憶(メモ)機能を持っている。会話の最初に見せられる一覧(下記)を踏まえ、重要な話が出たら聞かれなくても適切なファイルに書き留めてよい。「〇〇フォルダ作って、これ入れておいて」と言われたらmemory_write/memory_appendで保存し、「〇〇フォルダ見せて」と言われたらmemory_readで中身を見せる。ファイルパスは/areas/〇〇.mdのような形式にする
 17. 「6日目/8日目のメールテストして」「(6桁ID)で決済リマインドを試して」のように言われたら、test_expire_emailツールで指定されたIDと経過日数(6または8)を渡し、実際の待ち時間なしでリマインド・最終通知メールの送信をテストする
 18. 設定管理(BASEチャット/bot別/顧客別)について:「BASEチャットの〇〇を△△にして」→scope:"base"でset_setting、「Zoe001の〇〇を△△にして」→scope:"bot",id:"Zoe001"、「(6桁ID)の〇〇だけ△△にして」→scope:"customer",id:6桁IDでset_setting(自動でロックされる)。「(6桁ID)のブラックリスト変更ロック/ロック解除」と言われたらset_customer_settings_lockを使う。設定の優先順位は「顧客個別(ロック時)→bot別→BASEチャット」の順で、顧客個別に何か設定するとそのIDは自動的にロックされ、以後BASEチャットやbot別の変更が届かなくなることを、運営者に伝えておくとよい
+19. 「(function名)のレート制限テストして」と言われたら、test_rate_limitツールで該当のFunctionに繰り返しリクエストを送り、制限が発動する回数を確認する。send-emailをテストする場合は、実際にメールが送信されてしまうため、宛先(to)は運営者のメールアドレス(the.chatbot.zoe@gmail.com)など安全な宛先を使い、件名に「テスト」と分かるように入れること
 
 # トーンと制約
 - 簡潔で、業務的だが丁寧な話し方
@@ -855,6 +889,19 @@ const SECRETARY_TOOLS = [
         locked: { type: "boolean", description: "true=ロックする、false=ロック解除する" },
       },
       required: ["id", "locked"],
+    },
+  },
+  {
+    name: "test_rate_limit",
+    description: "指定したNetlify Function(例: send-email, customer, chat, verify-url, recall, generate-application)に、同じ内容のリクエストを指定回数連続で送り、レート制限が正しく発動するかをテストする。運営者が「(function名)のレート制限テストして」等と言った場合に使う。実際に指定回数分のリクエストを送るため、send-emailの場合は実際にメールが送信される点に注意し、テスト用のダミー宛先を使うこと。",
+    input_schema: {
+      type: "object",
+      properties: {
+        functionName: { type: "string", description: "テストしたいNetlify Functionの名前(例: send-email、customer、chat、verify-url、recall、generate-application)" },
+        payload: { type: "object", description: "毎回送信するリクエストボディ(JSON)。例: send-emailなら{to, subject, text}" },
+        times: { type: "number", description: "何回連続で送信するか(例: 25)" },
+      },
+      required: ["functionName", "payload", "times"],
     },
   },
 ];
@@ -1112,6 +1159,31 @@ async function executeSecretaryTool(name, input, requesterIp) {
         return "処理中にエラーが発生しました: " + e.message;
       }
     }
+    if (name === "test_rate_limit") {
+      try {
+        const url = `https://chatbot-proxy.netlify.app/.netlify/functions/${input.functionName}`;
+        const results = [];
+        for (let i = 0; i < input.times; i++) {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(input.payload),
+          });
+          results.push(res.status);
+          if (res.status === 429 || res.status === 403) break; // 制限がかかった時点で打ち切る
+        }
+        const blockedAt = results.findIndex((s) => s === 429 || s === 403);
+        return JSON.stringify({
+          functionName: input.functionName,
+          totalSent: results.length,
+          statusCodes: results,
+          blockedAtRequestNumber: blockedAt === -1 ? null : blockedAt + 1,
+          note: blockedAt === -1 ? "指定回数内では制限が発動しませんでした" : `${blockedAt + 1}回目で制限が発動しました(status ${results[blockedAt]})`,
+        });
+      } catch (e) {
+        return "テスト実行中にエラーが発生しました: " + e.message;
+      }
+    }
     return "不明なツールです";
   } catch (e) {
     return "ツール実行中にエラーが発生しました: " + e.message;
@@ -1268,10 +1340,21 @@ exports.handler = async (event) => {
     }
 
     if (!adminBypass) {
-      // ブラックリスト(1日50回超で永久ブロック)は、ID認証を経ない完全公開の
-      // 受付Zoe(zoe-chat)だけに適用する。設定Zoe・申込みZoeは、既にID・パスワードで
-      // 認証済みの正規のお客様が使うものなので、誤って締め出さないよう短期の
-      // レート制限のみとする
+      // 共通IP不正利用トラッカー:短期レート制限に何度も引っかかったIPは、
+      // ここで即座に拒否する(secretaryモードは別枠で対象外)
+      const globalAbuser = await checkIpAbuse(clientIp);
+      if (globalAbuser) {
+        return {
+          statusCode: 403,
+          headers,
+          body: JSON.stringify({ error: "このIPアドレスは、不審なアクセスが検知されたため利用を制限しています。" }),
+        };
+      }
+
+      // ブラックリスト(無関係発言連続検知)は、ID認証を経ない完全公開の
+      // 受付Zoe(zoe-chat)・本番チャット(zoe-production)だけに適用する。設定Zoe・申込みZoeは、
+      // 既にID・パスワードで認証済みの正規のお客様が使うものなので、誤って締め出さないよう
+      // 短期のレート制限のみとする
       const applyBlacklist = requestBody.mode === "zoe-chat" || requestBody.mode === "zoe-production";
       const rateLimitResult = await checkRateLimit(clientIp, applyBlacklist);
       if (!rateLimitResult.allowed) {
@@ -1282,6 +1365,7 @@ exports.handler = async (event) => {
             body: JSON.stringify({ error: "このIPアドレスは、不審なアクセスが検知されたため利用を制限しています。" }),
           };
         }
+        await recordIpAbuseStrike(clientIp);
         return {
           statusCode: 429,
           headers,
