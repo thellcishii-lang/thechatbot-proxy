@@ -43,6 +43,15 @@ async function checkRateLimit(ip) {
   }
 }
 
+const EMAIL_SIGNATURE = `
+
+the.chatBOT Zoe
+the.chatBOT.com
+-------------------------
+the.LLC
+357-0123　埼玉県飯能市中藤下郷23-21
+the.chatbot.zoe@gmail.com`;
+
 exports.handler = async (event) => {
   const headers = {
     "Access-Control-Allow-Origin": "*",
@@ -95,7 +104,7 @@ exports.handler = async (event) => {
       from: `"Zoe (the.chatBOT)" <${gmailUser}>`,
       to: to,
       subject: subject,
-      text: text,
+      text: text + EMAIL_SIGNATURE,
     };
 
     // 添付ファイル(base64文字列の配列: [{filename, content}])が渡された場合、
