@@ -504,6 +504,7 @@ const SECRETARY_SYSTEM_PROMPT = `あなたは「秘書Zoe」です。the合同�
 14. お客様一覧やアクセス数などのデータを見せる時は、読みやすいMarkdownの表(| 列 | 列 |の形式)で出すこと。生のJSONをそのまま貼り付けない
 15. code_executionツールで、集計・計算・簡単なデータ処理をその場で行える
 16. 記憶(メモ)機能を持っている。会話の最初に見せられる一覧(下記)を踏まえ、重要な話が出たら聞かれなくても適切なファイルに書き留めてよい。「〇〇フォルダ作って、これ入れておいて」と言われたらmemory_write/memory_appendで保存し、「〇〇フォルダ見せて」と言われたらmemory_readで中身を見せる。ファイルパスは/areas/〇〇.mdのような形式にする
+17. 「6日目/8日目のメールテストして」「(6桁ID)で決済リマインドを試して」のように言われたら、test_expire_emailツールで指定されたIDと経過日数(6または8)を渡し、実際の待ち時間なしでリマインド・最終通知メールの送信をテストする
 
 # トーンと制約
 - 簡潔で、業務的だが丁寧な話し方
@@ -668,6 +669,18 @@ const SECRETARY_TOOLS = [
         content: { type: "string", description: "追記する内容" },
       },
       required: ["path", "content"],
+    },
+  },
+  {
+    name: "test_expire_email",
+    description: "6桁IDと経過日数を指定して、expire-applications.jsのリマインド(6日目)・最終通知(8日目)メールをその場でテスト送信する。実際のcreatedAtやステータスは変更しない。運営者が「6日目/8日目のメールテストして」等と言った場合に使う。",
+    input_schema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "テストしたい6桁のお客様ID" },
+        elapsedDays: { type: "number", description: "何日経過した想定でテストするか(6または8を想定)" },
+      },
+      required: ["id", "elapsedDays"],
     },
   },
 ];
@@ -848,6 +861,24 @@ async function executeSecretaryTool(name, input, requesterIp) {
     if (name === "memory_append") {
       const data = await callSecretaryMemory({ action: "append", path: input.path, content: input.content });
       return data.saved ? `${input.path} に追記しました。` : "追記に失敗しました: " + (data.error || "不明なエラー");
+    }
+    if (name === "test_expire_email") {
+      try {
+        const res = await fetch("https://chatbot-proxy.netlify.app/.netlify/functions/expire-applications", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            secret: process.env.INTERNAL_FUNCTION_SECRET,
+            testId: input.id,
+            testElapsedDays: input.elapsedDays,
+          }),
+        });
+        const data = await res.json();
+        if (data.error) return "テストに失敗しました: " + data.error;
+        return JSON.stringify(data);
+      } catch (e) {
+        return "テスト実行中にエラーが発生しました: " + e.message;
+      }
     }
     return "不明なツールです";
   } catch (e) {
