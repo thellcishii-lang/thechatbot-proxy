@@ -53,6 +53,39 @@ async function checkRateLimit(ip) {
   }
 }
 
+// ============================================================
+// 共通IP不正利用トラッカー(全Function共通、ストア名"ip-abuse-tracker")
+// ============================================================
+async function checkIpAbuse(ip) {
+  try {
+    const store = getStore({
+      name: "ip-abuse-tracker",
+      siteID: process.env.NETLIFY_SITE_ID,
+      token: process.env.NETLIFY_API_TOKEN,
+    });
+    const record = await store.get(ip, { type: "json" });
+    return !!(record && record.blacklisted);
+  } catch (e) {
+    return false;
+  }
+}
+
+async function recordIpAbuseStrike(ip) {
+  try {
+    const store = getStore({
+      name: "ip-abuse-tracker",
+      siteID: process.env.NETLIFY_SITE_ID,
+      token: process.env.NETLIFY_API_TOKEN,
+    });
+    const record = (await store.get(ip, { type: "json" })) || {};
+    const strikes = (record.strikes || 0) + 1;
+    const blacklisted = strikes >= 3;
+    await store.setJSON(ip, { ...record, strikes, blacklisted });
+  } catch (e) {
+    // 記録に失敗しても本来の処理は止めない
+  }
+}
+
 exports.handler = async (event) => {
   const headers = {
     "Access-Control-Allow-Origin": "*",
@@ -68,8 +101,15 @@ exports.handler = async (event) => {
   }
 
   const clientIp = getClientIp(event);
+
+  const isAbuser = await checkIpAbuse(clientIp);
+  if (isAbuser) {
+    return { statusCode: 403, headers, body: JSON.stringify({ error: "このIPアドレスは、不審なアクセスが検知されたため利用を制限しています。" }) };
+  }
+
   const withinLimit = await checkRateLimit(clientIp);
   if (!withinLimit) {
+    await recordIpAbuseStrike(clientIp);
     return { statusCode: 429, headers, body: JSON.stringify({ error: "リクエストが多すぎます。しばらくしてから再度お試しください。" }) };
   }
 
