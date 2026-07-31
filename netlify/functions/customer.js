@@ -377,6 +377,44 @@ exports.handler = async (event) => {
       return { statusCode: 200, headers, body: JSON.stringify({ adminPassword }) };
     }
 
+    // ⑭ 秘書Zoe専用:指定IDの個別設定(customSettings)を1件更新する。
+    //   例: key="blacklistThreshold", value=8 のように使う
+    if (req.action === "adminSetCustomSetting") {
+      if (!process.env.INTERNAL_FUNCTION_SECRET || req.secret !== process.env.INTERNAL_FUNCTION_SECRET) {
+        return { statusCode: 401, headers, body: JSON.stringify({ error: "許可されていません" }) };
+      }
+      if (!req.id || !req.key) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "idとkeyが指定されていません" }) };
+      }
+      const record = await store.get(req.id, { type: "json" });
+      if (!record) {
+        return { statusCode: 404, headers, body: JSON.stringify({ error: "そのIDは存在しません" }) };
+      }
+      const customSettings = { ...(record.customSettings || {}), [req.key]: req.value };
+      const updated = { ...record, customSettings };
+      await store.setJSON(req.id, updated);
+      return { statusCode: 200, headers, body: JSON.stringify({ id: req.id, customSettings }) };
+    }
+
+    // ⑮ 秘書Zoe専用:指定IDの個別設定ロックのON/OFFを切り替える。
+    //   ロック中(settingsLocked:true)は、BASEチャット・Zoe001個別設定の変更が
+    //   このIDには反映されず、customSettingsの内容が優先して使われる
+    if (req.action === "adminSetSettingsLocked") {
+      if (!process.env.INTERNAL_FUNCTION_SECRET || req.secret !== process.env.INTERNAL_FUNCTION_SECRET) {
+        return { statusCode: 401, headers, body: JSON.stringify({ error: "許可されていません" }) };
+      }
+      if (!req.id || typeof req.locked !== "boolean") {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "idとlocked(true/false)が指定されていません" }) };
+      }
+      const record = await store.get(req.id, { type: "json" });
+      if (!record) {
+        return { statusCode: 404, headers, body: JSON.stringify({ error: "そのIDは存在しません" }) };
+      }
+      const updated = { ...record, settingsLocked: req.locked };
+      await store.setJSON(req.id, updated);
+      return { statusCode: 200, headers, body: JSON.stringify({ id: req.id, settingsLocked: req.locked }) };
+    }
+
     return { statusCode: 400, headers, body: JSON.stringify({ error: "不明なactionです" }) };
   } catch (err) {
     return { statusCode: 500, headers, body: JSON.stringify({ error: "内部エラー: " + err.message }) };
