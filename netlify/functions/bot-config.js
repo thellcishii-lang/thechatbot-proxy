@@ -78,6 +78,23 @@ exports.handler = async (event) => {
       return { statusCode: 200, headers, body: JSON.stringify({ saved: true, record: updated }) };
     }
 
+    // BASEチャット・bot別の設定値(ブラックリスト閾値など、systemPrompt以外の設定)を保存する。
+    // botId:"BASE" を使うと、全実装Zoe共通のBASEチャット設定として扱われる
+    if (req.action === "setSettings") {
+      if (!req.botId || typeof req.settings !== "object") {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "botIdとsettingsは必須です" }) };
+      }
+      const existing = (await store.get(req.botId, { type: "json" })) || {};
+      const updated = {
+        ...existing,
+        botId: req.botId,
+        settings: req.settings,
+        updatedAt: new Date().toISOString(),
+      };
+      await store.setJSON(req.botId, updated);
+      return { statusCode: 200, headers, body: JSON.stringify({ saved: true, record: updated }) };
+    }
+
     if (req.action === "register") {
       if (!req.repoName) {
         return { statusCode: 400, headers, body: JSON.stringify({ error: "repoNameが指定されていません" }) };
