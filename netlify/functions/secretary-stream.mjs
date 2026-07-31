@@ -856,6 +856,7 @@ async function streamAnthropicCall(anthropicRequestBody, apiKey, controller, enc
     if (!blocks[index]) {
       if (block.type === "text") blocks[index] = { type: "text", text: "" };
       else if (block.type === "tool_use") blocks[index] = { type: "tool_use", id: block.id, name: block.name, input: {}, _partialJson: "" };
+      else if (block.type === "thinking") blocks[index] = { type: "thinking", thinking: "", signature: "" };
       else blocks[index] = block;
     }
     return blocks[index];
@@ -890,6 +891,10 @@ async function streamAnthropicCall(anthropicRequestBody, apiKey, controller, enc
           controller.enqueue(encoder.encode(JSON.stringify({ type: "text_delta", text: evt.delta.text }) + "\n"));
         } else if (evt.delta.type === "input_json_delta") {
           b._partialJson += evt.delta.partial_json || "";
+        } else if (evt.delta.type === "thinking_delta") {
+          b.thinking += evt.delta.thinking || "";
+        } else if (evt.delta.type === "signature_delta") {
+          b.signature += evt.delta.signature || "";
         }
       } else if (evt.type === "content_block_stop") {
         const b = blocks[evt.index];
