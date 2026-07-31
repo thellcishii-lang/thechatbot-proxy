@@ -19,7 +19,9 @@
 // 通信が切れる問題が出ていたため)。他のmode(secretary等)も同様の
 // 仕組みが必要になった場合は、同じパターンで追加してください。
 
-import chatModule from "./chat.js";
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const chatModule = require("./chat.js");
 const {
   SETUP_TOOLS,
   SETUP_STAGE_TOOLS_EXTRA,
