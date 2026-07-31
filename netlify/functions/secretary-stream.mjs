@@ -1001,7 +1001,7 @@ export default async (req, context) => {
           const collectedImages = [];
           for (let i = 0; i < 8; i++) {
             const content = await streamAnthropicCall(
-              { model: "claude-sonnet-5", max_tokens: 1500, system: systemPromptWithMemory, tools, messages: currentMessages },
+              { model: "claude-sonnet-5", max_tokens: 60000, system: systemPromptWithMemory, tools, messages: currentMessages },
               apiKey, controller, encoder
             );
             collectedImages.push(...extractImages(content));
