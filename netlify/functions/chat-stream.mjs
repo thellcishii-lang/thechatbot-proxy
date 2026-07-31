@@ -1,7 +1,8 @@
-// netlify/functions/chat-stream.js
+// netlify/functions/chat-stream.mjs
 //
 // chat.js(mode:"zoe-setup")の「資料読み込み・深い調査」のように時間がかかる
-// 処理専用の、ストリーミング配信版エンドポイントです。
+// 処理専用の、ストリーミング配信版エンドポイントです。設定Zoe専用です。
+// (秘書Zoeはsecretary-stream.mjsという別の独立したファイルを使っています)
 //
 // 通常のchat.js(classic形式のFunction)は、応答が完成するまで待ってから
 // 一括で返す仕組みのため、Netlify Functionsの実行時間上限(標準30秒)に
@@ -15,9 +16,6 @@
 //
 // プロンプト・ツール定義そのものはchat.js側で一元管理しているものを
 // そのまま再利用し(chat.jsのexports._internals経由)、ここでは二重管理しません。
-// 現時点ではmode:"zoe-setup"のみ対応しています(まず資料読み込みで
-// 通信が切れる問題が出ていたため)。他のmode(secretary等)も同様の
-// 仕組みが必要になった場合は、同じパターンで追加してください。
 
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
@@ -30,12 +28,6 @@ const {
   checkIpAbuse,
   recordIpAbuseStrike,
   callCustomerAdmin,
-  SECRETARY_SYSTEM_PROMPT,
-  SECRETARY_TOOLS,
-  callSecretaryMemory,
-  executeSecretaryTool,
-  isValidAdminSession,
-  extractImages,
 } = chatModule._internals;
 
 // Anthropicのストリーミングイベント(SSE)を読みながら、
@@ -184,105 +176,43 @@ export default async (req, context) => {
     });
   }
 
-  if (requestBody.mode !== "zoe-setup" && requestBody.mode !== "secretary") {
-    return new Response(JSON.stringify({ error: "現時点ではmode:'zoe-setup'またはmode:'secretary'のみ対応しています" }), {
+  if (requestBody.mode !== "zoe-setup") {
+    return new Response(JSON.stringify({ error: "現時点ではmode:'zoe-setup'のみ対応しています(秘書Zoeはsecretary-stream.mjsを使用してください)" }), {
       status: 400,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
-  if (requestBody.mode === "zoe-setup" && !requestBody.id) {
+  if (!requestBody.id) {
     return new Response(JSON.stringify({ error: "idが指定されていません" }), {
       status: 400,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
-  }
-  if (requestBody.mode === "secretary") {
-    const valid = await isValidAdminSession(requestBody.sessionToken);
-    if (!valid) {
-      return new Response(JSON.stringify({ error: "セッションが無効です。再度ログインしてください。" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
   }
 
   const stream = new ReadableStream({
     async start(controller) {
       const encoder = new TextEncoder();
       try {
-        if (requestBody.mode === "zoe-setup") {
-          const system = await buildSetupSystemPrompt(
-            requestBody.customerName,
-            requestBody.email,
-            requestBody.stage1Complete,
-            requestBody.stage2Active,
-            requestBody.stage2Complete,
-            requestBody.published
-          );
-          const tools = [
-            ...SETUP_TOOLS,
-            ...SETUP_STAGE_TOOLS_EXTRA,
-            { type: "web_search_20260209", name: "web_search" },
-            { type: "web_fetch_20260209", name: "web_fetch" },
-            { type: "code_execution_20260120", name: "code_execution" },
-          ];
-          const content = await streamAnthropicCall(
-            { model: "claude-sonnet-4-6", max_tokens: 4096, system, tools, messages: requestBody.messages },
-            apiKey, controller, encoder
-          );
-          controller.enqueue(encoder.encode(JSON.stringify({ type: "final", content }) + "\n"));
-        } else if (requestBody.mode === "secretary") {
-          // 秘書Zoeは、ツール実行(get_setting等)を挟みながら最大8ラウンド、
-          // サーバー内で会話を続ける。各ラウンドをストリーミング呼び出しにし、
-          // ラウンドの合間もツール実行の状況を逐次送ることで、通信を維持し続ける
-          let currentMessages = (requestBody.messages || []).slice();
-
-          let memoryListingText = "(取得できませんでした)";
-          try {
-            const listData = await callSecretaryMemory({ action: "list" });
-            if (listData.items) {
-              memoryListingText = listData.items.length
-                ? listData.items.map((it) => `- ${it.path} — ${it.preview}`).join("\n")
-                : "(まだ何も保存されていません)";
-            }
-          } catch (e) {}
-          const systemPromptWithMemory = SECRETARY_SYSTEM_PROMPT + `\n\n# 現在保存されている記憶(メモ)一覧\n${memoryListingText}`;
-          const tools = [
-            ...SECRETARY_TOOLS,
-            { type: "web_search_20260209", name: "web_search" },
-            { type: "web_fetch_20260209", name: "web_fetch" },
-            { type: "code_execution_20260120", name: "code_execution" },
-          ];
-
-          let finalContent = null;
-          const collectedImages = [];
-          for (let i = 0; i < 8; i++) {
-            const content = await streamAnthropicCall(
-              { model: "claude-sonnet-5", max_tokens: 1500, system: systemPromptWithMemory, tools, messages: currentMessages },
-              apiKey, controller, encoder
-            );
-            collectedImages.push(...extractImages(content));
-            const toolUseBlocks = content.filter((b) => b.type === "tool_use");
-            if (toolUseBlocks.length === 0) {
-              finalContent = content;
-              break;
-            }
-            const toolResultBlocks = [];
-            for (const block of toolUseBlocks) {
-              controller.enqueue(encoder.encode(JSON.stringify({ type: "tool_status", name: block.name }) + "\n"));
-              const toolResultText = await executeSecretaryTool(block.name, block.input, requestBody._clientIp || "unknown");
-              toolResultBlocks.push({ type: "tool_result", tool_use_id: block.id, content: toolResultText });
-            }
-            currentMessages = currentMessages.concat([
-              { role: "assistant", content },
-              { role: "user", content: toolResultBlocks },
-            ]);
-          }
-          if (!finalContent) {
-            finalContent = [{ type: "text", text: "処理が複雑すぎたため、途中で打ち切りました。もう一度お試しください。" }];
-          }
-          controller.enqueue(encoder.encode(JSON.stringify({ type: "final", content: finalContent, images: collectedImages }) + "\n"));
-        }
+        const system = await buildSetupSystemPrompt(
+          requestBody.customerName,
+          requestBody.email,
+          requestBody.stage1Complete,
+          requestBody.stage2Active,
+          requestBody.stage2Complete,
+          requestBody.published
+        );
+        const tools = [
+          ...SETUP_TOOLS,
+          ...SETUP_STAGE_TOOLS_EXTRA,
+          { type: "web_search_20260209", name: "web_search" },
+          { type: "web_fetch_20260209", name: "web_fetch" },
+          { type: "code_execution_20260120", name: "code_execution" },
+        ];
+        const content = await streamAnthropicCall(
+          { model: "claude-sonnet-4-6", max_tokens: 60000, system, tools, messages: requestBody.messages },
+          apiKey, controller, encoder
+        );
+        controller.enqueue(encoder.encode(JSON.stringify({ type: "final", content }) + "\n"));
       } catch (err) {
         controller.enqueue(encoder.encode(JSON.stringify({ type: "error", error: err.message }) + "\n"));
       }
