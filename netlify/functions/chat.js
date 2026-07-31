@@ -43,8 +43,6 @@ async function checkRateLimit(ip, applyBlacklist) {
 
     const SHORT_WINDOW_MS = 5 * 60 * 1000;   // 5分間
     const SHORT_LIMIT = 20;                  // 5分間に20回まで
-    const DAY_WINDOW_MS = 24 * 60 * 60 * 1000; // 1日
-    const DAY_LIMIT = 50;                    // 1日に50回まで。超えたら永久ブラックリスト入り(applyBlacklistがtrueの場合のみ)
 
     const now = Date.now();
     const record = (await store.get(ip, { type: "json" })) || {};
@@ -54,7 +52,7 @@ async function checkRateLimit(ip, applyBlacklist) {
       return { allowed: false, reason: "blacklisted" };
     }
 
-    // 5分間の短期カウンター
+    // 5分間の短期カウンター(スパム的な連投を抑える目的。ブラックリストとは別物)
     let shortStart = record.shortStart || now;
     let shortCount = record.shortCount || 0;
     if (now - shortStart > SHORT_WINDOW_MS) {
@@ -63,27 +61,149 @@ async function checkRateLimit(ip, applyBlacklist) {
     }
     shortCount++;
 
-    // 1日の長期カウンター
-    let dayStart = record.dayStart || now;
-    let dayCount = record.dayCount || 0;
-    if (now - dayStart > DAY_WINDOW_MS) {
-      dayStart = now;
-      dayCount = 0;
-    }
-    dayCount++;
+    await store.setJSON(ip, { ...record, shortStart, shortCount });
 
-    // 1日50回を超えたら、恒久的にブラックリスト入り(ブラックリスト対象の呼び出し元のみ)
-    const blacklisted = applyBlacklist && dayCount > DAY_LIMIT;
-
-    await store.setJSON(ip, { shortStart, shortCount, dayStart, dayCount, blacklisted: !!(record.blacklisted || blacklisted) });
-
-    if (blacklisted) return { allowed: false, reason: "blacklisted" };
     if (shortCount > SHORT_LIMIT) return { allowed: false, reason: "rate_limited" };
 
     return { allowed: true };
   } catch (e) {
     return { allowed: true }; // 判定自体が失敗しても本来の機能は止めない
   }
+}
+
+// ============================================================
+// ブラックリスト設定の階層解決(BASEチャット → bot別 → 顧客個別)
+// ============================================================
+// 優先順位:
+//   1. 顧客個別設定(customerId指定時、customSettings.blacklistThresholdが
+//      あり、かつ settingsLocked === true の場合のみ最優先で使う)
+//   2. bot別設定(botConfigId指定時、そのbotIdの settings.blacklistThreshold)
+//   3. BASEチャット(botId:"BASE")の settings.blacklistThreshold
+//   4. どこにも設定がなければコード側のデフォルト値
+const DEFAULT_BLACKLIST_THRESHOLD_FIRST = 10; // 初回(まだリセットされていない状態)の閾値
+const DEFAULT_BLACKLIST_THRESHOLD_AFTER_RESET = 8; // 一度リセットされた後の閾値
+
+async function getBlacklistThresholds(botConfigId, customerId) {
+  try {
+    // ① 顧客個別設定(ロック時のみ)
+    if (customerId) {
+      const cust = await callCustomerAdmin({ action: "adminGet", id: customerId });
+      if (cust.record && cust.record.settingsLocked && cust.record.customSettings) {
+        const cs = cust.record.customSettings;
+        if (typeof cs.blacklistThresholdFirst === "number" || typeof cs.blacklistThresholdAfterReset === "number") {
+          return {
+            first: cs.blacklistThresholdFirst ?? DEFAULT_BLACKLIST_THRESHOLD_FIRST,
+            afterReset: cs.blacklistThresholdAfterReset ?? DEFAULT_BLACKLIST_THRESHOLD_AFTER_RESET,
+          };
+        }
+      }
+    }
+    // ② bot別設定(例: Zoe001)
+    if (botConfigId) {
+      const botCfg = await callBotConfig({ action: "get", botId: botConfigId });
+      if (botCfg.record && botCfg.record.settings) {
+        const s = botCfg.record.settings;
+        if (typeof s.blacklistThresholdFirst === "number" || typeof s.blacklistThresholdAfterReset === "number") {
+          return {
+            first: s.blacklistThresholdFirst ?? DEFAULT_BLACKLIST_THRESHOLD_FIRST,
+            afterReset: s.blacklistThresholdAfterReset ?? DEFAULT_BLACKLIST_THRESHOLD_AFTER_RESET,
+          };
+        }
+      }
+    }
+    // ③ BASEチャット
+    const base = await callBotConfig({ action: "get", botId: "BASE" });
+    if (base.record && base.record.settings) {
+      const s = base.record.settings;
+      if (typeof s.blacklistThresholdFirst === "number" || typeof s.blacklistThresholdAfterReset === "number") {
+        return {
+          first: s.blacklistThresholdFirst ?? DEFAULT_BLACKLIST_THRESHOLD_FIRST,
+          afterReset: s.blacklistThresholdAfterReset ?? DEFAULT_BLACKLIST_THRESHOLD_AFTER_RESET,
+        };
+      }
+    }
+  } catch (e) {
+    // 取得に失敗した場合は、安全のためコード側のデフォルトにフォールバックする
+  }
+  return { first: DEFAULT_BLACKLIST_THRESHOLD_FIRST, afterReset: DEFAULT_BLACKLIST_THRESHOLD_AFTER_RESET };
+}
+
+// Zoeが「この発言は業務(the.chatBOT導入)に無関係だった」と判定した回数を、
+// IPアドレスごとに連続でカウントする。関係ある発言が1回でも挟まればカウントは
+// 0に戻るが、2回目以降のリセット後は閾値が下がる(抜け道封じ)。
+async function recordTopicRelevance(ip, relevant, botConfigId, customerId) {
+  try {
+    const store = getStore({
+      name: "rate-limit-chat",
+      siteID: process.env.NETLIFY_SITE_ID,
+      token: process.env.NETLIFY_API_TOKEN,
+    });
+    const record = (await store.get(ip, { type: "json" })) || {};
+    if (record.blacklisted) return; // 既にブラックリスト済みなら何もしない
+
+    let streak = record.offTopicStreak || 0;
+    let resetCount = record.offTopicResetCount || 0;
+
+    if (relevant) {
+      if (streak > 0) resetCount++;
+      streak = 0;
+    } else {
+      streak++;
+    }
+
+    const thresholds = await getBlacklistThresholds(botConfigId, customerId);
+    const currentThreshold = resetCount > 0 ? thresholds.afterReset : thresholds.first;
+    const blacklisted = streak >= currentThreshold;
+
+    await store.setJSON(ip, { ...record, offTopicStreak: streak, offTopicResetCount: resetCount, blacklisted });
+  } catch (e) {
+    // 判定・記録に失敗しても、本来のチャット機能は止めない
+  }
+}
+
+// Zoeがtrack_topic_relevanceツールを呼んだ場合、それをフロントに見せず
+// サーバー側だけで処理し(recordTopicRelevanceを実行)、続きの応答を改めて取得する。
+// このツールと他のツールが同じ応答内で同時に呼ばれた場合は、判定だけ記録した上で
+// そのままフロントに返し、他のツールの実行はこれまで通りフロント側に任せる。
+async function callAnthropicWithTopicTracking(anthropicRequest, apiKey, clientIp, botConfigId, customerId) {
+  let messages = anthropicRequest.messages.slice();
+  for (let i = 0; i < 4; i++) {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({ ...anthropicRequest, messages }),
+    });
+    const data = await response.json();
+    if (data.error || !data.content) {
+      return { status: response.status, data };
+    }
+
+    const toolUseBlocks = data.content.filter((b) => b.type === "tool_use");
+    const relevanceBlock = toolUseBlocks.find((b) => b.name === "track_topic_relevance");
+    if (!relevanceBlock) {
+      return { status: response.status, data };
+    }
+
+    await recordTopicRelevance(clientIp, !!relevanceBlock.input.relevant, botConfigId, customerId);
+
+    if (toolUseBlocks.length > 1) {
+      // 他のツールと同時に呼ばれてしまった場合は、記録だけ済ませてそのままフロントに返す
+      return { status: response.status, data };
+    }
+
+    messages = messages.concat([
+      { role: "assistant", content: data.content },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: relevanceBlock.id, content: "記録しました" }] },
+    ]);
+  }
+  return {
+    status: 200,
+    data: { content: [{ type: "text", text: "処理が複雑すぎたため、途中で打ち切りました。もう一度お試しください。" }] },
+  };
 }
 
 const SALES_SYSTEM_PROMPT = `あなたは「Zoe(ゾーイ)」という、the.chatBOTが開発した対話型AIです。親しみやすく、簡潔に、日本語で会話してください。
@@ -156,6 +276,10 @@ const SALES_SYSTEM_PROMPT = `あなたは「Zoe(ゾーイ)」という、the.cha
 4. 「はい」等、内容に相違ない旨の返答が得られたら、send_emailツールでthe.chatbot.zoe@gmail.com宛に、収集した6項目とここまでの会話の要約を送信する。送信後、お客様には「担当者より改めてご連絡いたします」と伝える
 5. 情報が十分に得られない、または内容確認で明確な同意が得られない場合、担当者への引き継ぎは行わない。ただしこの場合も、send_emailツールでthe.chatbot.zoe@gmail.com宛に「確認が取れないまま会話が終了した」旨と、分かっている範囲の情報・会話の要約を送信する。お客様には無理に情報を聞き出そうとせず、自然に会話を締めくくってよい
 
+# 内部判定について(お客様には見せない)
+- 訪問者から新しいメッセージが届いたら、他の応答より先に、track_topic_relevanceツールを単独で呼び、その発言がthe.chatBOT導入に関する話かどうかを判定すること。困りごと相談・機能質問・料金・申込み・資料請求・軽い相槌や雑談程度の反応はすべてrelevant:trueでよい。サービスと全く関係のない話題(荒らし目的の連投、無関係な質問の連続等)のみrelevant:falseとする
+- このツールを呼んだこと自体、判定結果も、お客様には一切明かさない
+
 # トーンと制約
 - 1回の返信は3〜5文程度に収め、長々と説明しすぎない
 - 押し売り感を出さない。相手のペースに合わせる
@@ -202,6 +326,17 @@ const SALES_TOOLS = [
         companyUrl: { type: "string", description: "会社URL" },
       },
       required: ["customerName", "email"],
+    },
+  },
+  {
+    name: "track_topic_relevance",
+    description: "内部専用・お客様には一切見えない判定ツール。訪問者の直近の発言が、the.chatBOT導入に関する話(困りごと相談、機能質問、料金、申込み、資料請求、雑談程度の相槌なども含む)かどうかを判定するために、あなたの応答の一部として毎回1回だけ呼ぶ。他のツールと同時に呼ばず、単独で呼ぶこと。呼んだことは絶対にお客様に伝えない。",
+    input_schema: {
+      type: "object",
+      properties: {
+        relevant: { type: "boolean", description: "直近の訪問者の発言が業務に関連していればtrue、全く無関係な話題(サービスと関係のない雑談・荒らし行為等)であればfalse" },
+      },
+      required: ["relevant"],
     },
   },
   {
@@ -505,6 +640,7 @@ const SECRETARY_SYSTEM_PROMPT = `あなたは「秘書Zoe」です。the合同�
 15. code_executionツールで、集計・計算・簡単なデータ処理をその場で行える
 16. 記憶(メモ)機能を持っている。会話の最初に見せられる一覧(下記)を踏まえ、重要な話が出たら聞かれなくても適切なファイルに書き留めてよい。「〇〇フォルダ作って、これ入れておいて」と言われたらmemory_write/memory_appendで保存し、「〇〇フォルダ見せて」と言われたらmemory_readで中身を見せる。ファイルパスは/areas/〇〇.mdのような形式にする
 17. 「6日目/8日目のメールテストして」「(6桁ID)で決済リマインドを試して」のように言われたら、test_expire_emailツールで指定されたIDと経過日数(6または8)を渡し、実際の待ち時間なしでリマインド・最終通知メールの送信をテストする
+18. 設定管理(BASEチャット/bot別/顧客別)について:「BASEチャットの〇〇を△△にして」→scope:"base"でset_setting、「Zoe001の〇〇を△△にして」→scope:"bot",id:"Zoe001"、「(6桁ID)の〇〇だけ△△にして」→scope:"customer",id:6桁IDでset_setting(自動でロックされる)。「(6桁ID)のブラックリスト変更ロック/ロック解除」と言われたらset_customer_settings_lockを使う。設定の優先順位は「顧客個別(ロック時)→bot別→BASEチャット」の順で、顧客個別に何か設定するとそのIDは自動的にロックされ、以後BASEチャットやbot別の変更が届かなくなることを、運営者に伝えておくとよい
 
 # トーンと制約
 - 簡潔で、業務的だが丁寧な話し方
@@ -681,6 +817,44 @@ const SECRETARY_TOOLS = [
         elapsedDays: { type: "number", description: "何日経過した想定でテストするか(6または8を想定)" },
       },
       required: ["id", "elapsedDays"],
+    },
+  },
+  {
+    name: "get_setting",
+    description: "設定値を取得する。scopeは'base'(BASEチャット、全実装Zoe共通)・'bot'(botId指定、例:Zoe001個別)・'customer'(6桁ID指定、個別顧客)のいずれか。ブラックリストの閾値(blacklistThresholdFirst/blacklistThresholdAfterReset)などを確認する時に使う。",
+    input_schema: {
+      type: "object",
+      properties: {
+        scope: { type: "string", enum: ["base", "bot", "customer"] },
+        id: { type: "string", description: "scope='bot'ならbotId(例:Zoe001)、scope='customer'なら6桁ID。scope='base'の場合は不要" },
+      },
+      required: ["scope"],
+    },
+  },
+  {
+    name: "set_setting",
+    description: "設定値を1件保存する。scopeは'base'(BASEチャット、変更すると全実装Zoeに反映)・'bot'(指定botIdだけに適用)・'customer'(指定6桁IDだけに適用、自動でロックされる)のいずれか。運営者が「ブラックリストの閾値を〇〇にして」等と言った場合に使う。",
+    input_schema: {
+      type: "object",
+      properties: {
+        scope: { type: "string", enum: ["base", "bot", "customer"] },
+        id: { type: "string", description: "scope='bot'ならbotId、scope='customer'なら6桁ID。scope='base'なら不要" },
+        key: { type: "string", description: "例: blacklistThresholdFirst、blacklistThresholdAfterReset" },
+        value: { description: "保存する値(数値・文字列・真偽値のいずれか)" },
+      },
+      required: ["scope", "key", "value"],
+    },
+  },
+  {
+    name: "set_customer_settings_lock",
+    description: "指定した6桁IDの個別設定ロックをON/OFFする。運営者が「(6桁ID)のブラックリスト変更ロック」または「ロック解除」と言った場合に使う。ロック中は、BASEチャット・bot別設定の変更がそのIDには反映されず、個別設定(customSettings)が優先される。",
+    input_schema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "6桁のお客様ID" },
+        locked: { type: "boolean", description: "true=ロックする、false=ロック解除する" },
+      },
+      required: ["id", "locked"],
     },
   },
 ];
@@ -878,6 +1052,64 @@ async function executeSecretaryTool(name, input, requesterIp) {
         return JSON.stringify(data);
       } catch (e) {
         return "テスト実行中にエラーが発生しました: " + e.message;
+      }
+    }
+    if (name === "get_setting") {
+      try {
+        if (input.scope === "base") {
+          const data = await callBotConfig({ action: "get", botId: "BASE" });
+          return JSON.stringify(data.record ? data.record.settings || {} : {});
+        }
+        if (input.scope === "bot") {
+          if (!input.id) return "scope='bot'の場合、id(botId)が必要です";
+          const data = await callBotConfig({ action: "get", botId: input.id });
+          return JSON.stringify(data.record ? data.record.settings || {} : {});
+        }
+        if (input.scope === "customer") {
+          if (!input.id) return "scope='customer'の場合、id(6桁ID)が必要です";
+          const data = await callCustomerAdmin({ action: "adminGet", id: input.id });
+          if (!data.record) return "そのIDは見つかりませんでした";
+          return JSON.stringify({ customSettings: data.record.customSettings || {}, settingsLocked: !!data.record.settingsLocked });
+        }
+        return "不明なscopeです";
+      } catch (e) {
+        return "取得中にエラーが発生しました: " + e.message;
+      }
+    }
+    if (name === "set_setting") {
+      try {
+        if (input.scope === "base" || input.scope === "bot") {
+          const botId = input.scope === "base" ? "BASE" : input.id;
+          if (input.scope === "bot" && !botId) return "scope='bot'の場合、idが必要です";
+          const existing = await callBotConfig({ action: "get", botId });
+          const currentSettings = (existing.record && existing.record.settings) || {};
+          const newSettings = { ...currentSettings, [input.key]: input.value };
+          // bot-configのsetアクションはsystemPrompt専用のため、settingsは別のaction("setSettings")を使う
+          const data = await callBotConfig({ action: "setSettings", botId, settings: newSettings });
+          return data.saved
+            ? `${botId}(${input.scope === "base" ? "BASEチャット" : "bot別"})の設定を更新しました: ${input.key} = ${JSON.stringify(input.value)}`
+            : "保存に失敗しました: " + (data.error || "不明なエラー");
+        }
+        if (input.scope === "customer") {
+          if (!input.id) return "scope='customer'の場合、id(6桁ID)が必要です";
+          const data = await callCustomerAdmin({ action: "adminSetCustomSetting", id: input.id, key: input.key, value: input.value });
+          if (data.error) return "保存に失敗しました: " + data.error;
+          // 個別設定を入れた場合は、自動でロックする
+          await callCustomerAdmin({ action: "adminSetSettingsLocked", id: input.id, locked: true });
+          return `お客様(ID: ${input.id})の個別設定を更新し、自動的にロックしました: ${input.key} = ${JSON.stringify(input.value)}`;
+        }
+        return "不明なscopeです";
+      } catch (e) {
+        return "保存中にエラーが発生しました: " + e.message;
+      }
+    }
+    if (name === "set_customer_settings_lock") {
+      try {
+        const data = await callCustomerAdmin({ action: "adminSetSettingsLocked", id: input.id, locked: input.locked });
+        if (data.error) return "処理に失敗しました: " + data.error;
+        return `お客様(ID: ${input.id})の個別設定ロックを${input.locked ? "ON(ロック)" : "OFF(解除)"}にしました。`;
+      } catch (e) {
+        return "処理中にエラーが発生しました: " + e.message;
       }
     }
     return "不明なツールです";
@@ -1139,8 +1371,20 @@ exports.handler = async (event) => {
         return { statusCode: 200, headers, body: JSON.stringify({ content: [{ type: "text", text: "現在、このチャットはご利用いただけません。" }] }) };
       }
       const knowledge = (cust.record.productionKnowledge || "").trim();
-      anthropicRequest.system = `あなたは「${cust.record.chatDisplayName || "Zoe"}」という対話型AIです。${cust.record.customerName || "御社"}の窓口として、以下の知識をもとに、お客様からの質問に丁寧に答えてください。\n\n# 知識\n${knowledge || "(まだ知識が登録されていません)"}\n\n# 制約\n- 分からないことは正直に「分かりかねます」と伝え、担当者への確認を案内する\n- 1回の返信は簡潔に(3〜5文程度)`;
-      anthropicRequest.tools = [];
+      anthropicRequest.system = `あなたは「${cust.record.chatDisplayName || "Zoe"}」という対話型AIです。${cust.record.customerName || "御社"}の窓口として、以下の知識をもとに、お客様からの質問に丁寧に答えてください。\n\n# 知識\n${knowledge || "(まだ知識が登録されていません)"}\n\n# 制約\n- 分からないことは正直に「分かりかねます」と伝え、担当者への確認を案内する\n- 1回の返信は簡潔に(3〜5文程度)\n\n# 内部判定について(お客様には見せない)\n- 訪問者から新しいメッセージが届いたら、他の応答より先に、track_topic_relevanceツールを単独で呼び、その発言が御社への問い合わせとして自然な内容かどうかを判定すること。判定結果はお客様に一切明かさない`;
+      anthropicRequest.tools = [
+        {
+          name: "track_topic_relevance",
+          description: "内部専用・お客様には一切見えない判定ツール。訪問者の直近の発言が、御社への問い合わせとして自然な内容かどうかを判定するために、あなたの応答の一部として毎回1回だけ呼ぶ。他のツールと同時に呼ばない。",
+          input_schema: {
+            type: "object",
+            properties: {
+              relevant: { type: "boolean", description: "自然な問い合わせであればtrue、全く無関係な話題であればfalse" },
+            },
+            required: ["relevant"],
+          },
+        },
+      ];
     } else {
       // 後方互換モード(まだmode対応していない画面用)。今後、他の画面も
       // 同様にサーバー側へロジックを移し、このelse分岐は無くしていく想定
@@ -1151,6 +1395,15 @@ exports.handler = async (event) => {
     }
     if (requestBody.tool_choice) {
       anthropicRequest.tool_choice = requestBody.tool_choice;
+    }
+
+    // zoe-chat(Zoe001)・zoe-production(顧客の本番チャット)はブラックリスト判定対象のため、
+    // track_topic_relevanceツールの呼び出しをここでサーバー側だけで処理し、フロントには見せない
+    if (requestBody.mode === "zoe-chat" || requestBody.mode === "zoe-production") {
+      const botConfigId = requestBody.mode === "zoe-chat" ? "Zoe001" : null;
+      const customerId = requestBody.mode === "zoe-production" ? requestBody.id : null;
+      const result = await callAnthropicWithTopicTracking(anthropicRequest, apiKey, clientIp, botConfigId, customerId);
+      return { statusCode: result.status, headers, body: JSON.stringify(result.data) };
     }
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
