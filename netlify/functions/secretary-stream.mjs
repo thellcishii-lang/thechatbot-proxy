@@ -999,7 +999,7 @@ export default async (req, context) => {
 
           let finalContent = null;
           const collectedImages = [];
-          for (let i = 0; i < 8; i++) {
+          for (let i = 0; i < 20; i++) {
             const content = await streamAnthropicCall(
               { model: "claude-sonnet-5", max_tokens: 60000, system: systemPromptWithMemory, tools, messages: currentMessages },
               apiKey, controller, encoder
