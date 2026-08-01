@@ -172,7 +172,7 @@ exports.handler = async (event) => {
       if (record.password === req.password) {
         return { statusCode: 200, headers, body: JSON.stringify({ record, loggedInAs: "owner" }) };
       }
-      if (record.adminPassword && record.adminPassword === req.password) {
+      if (record.adminPassword && record.adminPassword === req.password && record.adminPasswordExpiresAt && Date.now() < record.adminPasswordExpiresAt) {
         return { statusCode: 200, headers, body: JSON.stringify({ record, loggedInAs: "admin" }) };
       }
       return { statusCode: 401, headers, body: JSON.stringify({ error: "パスワードが違います" }) };
@@ -190,6 +190,27 @@ exports.handler = async (event) => {
       const updated = { ...record, ...req.updates };
       await store.setJSON(req.id, updated);
       return { statusCode: 200, headers, body: JSON.stringify({ record: updated }) };
+    }
+
+    // ③.5 「現在の仕様」タブ用:保存済みの資料(base64)とキュー状況を取得する(パスワード必須)
+    if (req.action === "getSpecDoc") {
+      const record = await store.get(req.id, { type: "json" });
+      if (!record) {
+        return { statusCode: 404, headers, body: JSON.stringify({ error: "そのIDは存在しません" }) };
+      }
+      if (record.password !== req.password) {
+        return { statusCode: 401, headers, body: JSON.stringify({ error: "パスワードが違います" }) };
+      }
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          specStatus: record.specStatus || "idle",
+          specQueueCount: record.specQueueCount || 0,
+          specDocBase64: record.specDocBase64 || null,
+          specDocFilename: record.specDocFilename || null,
+        }),
+      };
     }
 
     // ④ 存在確認のみ(本番チャット画面が起動時に使う。パスワード不要)
@@ -211,6 +232,8 @@ exports.handler = async (event) => {
           published: !!record.published,
           chatDisplayName: record.chatDisplayName || null,
           chatTheme: record.chatTheme || null,
+          specStatus: record.specStatus || "idle",
+          specQueueCount: record.specQueueCount || 0,
         }),
       };
     }
@@ -412,7 +435,8 @@ exports.handler = async (event) => {
         return { statusCode: 401, headers, body: JSON.stringify({ error: "許可されていません" }) };
       }
       const adminPassword = generatePassword();
-      const updated = { ...record, adminPassword };
+      const adminPasswordExpiresAt = Date.now() + 15 * 60 * 1000; // 15分の有効期限
+      const updated = { ...record, adminPassword, adminPasswordExpiresAt };
       await store.setJSON(req.id, updated);
       return { statusCode: 200, headers, body: JSON.stringify({ adminPassword }) };
     }
@@ -453,6 +477,25 @@ exports.handler = async (event) => {
       const updated = { ...record, settingsLocked: req.locked };
       await store.setJSON(req.id, updated);
       return { statusCode: 200, headers, body: JSON.stringify({ id: req.id, settingsLocked: req.locked }) };
+    }
+
+    // ⑫ update-spec.js専用:内部シークレットで任意のフィールドを更新する汎用アクション。
+    //   「現在の仕様」機能(specStatus/specQueueCount/specDocBase64等)の読み書きに使う
+    if (req.action === "adminUpdate") {
+      if (!process.env.INTERNAL_FUNCTION_SECRET || req.secret !== process.env.INTERNAL_FUNCTION_SECRET) {
+        return { statusCode: 401, headers, body: JSON.stringify({ error: "許可されていません" }) };
+      }
+      if (!req.id) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "idが指定されていません" }) };
+      }
+      const record = await store.get(req.id, { type: "json" });
+      if (!record) {
+        return { statusCode: 404, headers, body: JSON.stringify({ error: "そのIDは存在しません" }) };
+      }
+      const updated = { ...record, ...req.updates };
+      await store.setJSON(req.id, updated);
+      const { password, ...safeUpdated } = updated;
+      return { statusCode: 200, headers, body: JSON.stringify({ record: safeUpdated }) };
     }
 
     return { statusCode: 400, headers, body: JSON.stringify({ error: "不明なactionです" }) };
