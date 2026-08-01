@@ -43,6 +43,7 @@ async function streamAnthropicCall(anthropicRequestBody, apiKey, controller, enc
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({ ...anthropicRequestBody, stream: true }),
+    signal: AbortSignal.timeout(600000), // 10分。Anthropic側が完全に無応答になった場合の保険(通常のストリーミングは妨げない)
   });
   if (!res.ok || !res.body) {
     const errText = await res.text().catch(() => "");
@@ -75,7 +76,7 @@ async function streamAnthropicCall(anthropicRequestBody, apiKey, controller, enc
       const line = rawEvent.split("\n").find((l) => l.startsWith("data:"));
       if (!line) continue;
       const jsonStr = line.slice(5).trim();
-      if (!jsonStr || jsonStr === "[DONE]") continue;
+      if (!jsonStr) continue;
       let evt;
       try {
         evt = JSON.parse(jsonStr);
@@ -105,6 +106,7 @@ async function streamAnthropicCall(anthropicRequestBody, apiKey, controller, enc
           try {
             b.input = b._partialJson ? JSON.parse(b._partialJson) : {};
           } catch (e) {
+            console.error(`tool_use入力のJSONパースに失敗しました(tool: ${b.name || "unknown"}):`, e.message, "raw:", b._partialJson);
             b.input = {};
           }
           delete b._partialJson;
@@ -206,14 +208,17 @@ export default async (req, context) => {
           ...SETUP_STAGE_TOOLS_EXTRA,
           { type: "web_search_20260209", name: "web_search" },
           { type: "web_fetch_20260209", name: "web_fetch" },
-          { type: "code_execution_20260120", name: "code_execution" },
+          { type: "code_execution_20260120", name: "code_execution", cache_control: { type: "ephemeral" } },
         ];
+        // プロンプトキャッシュ対応:systemを配列形式にしcache_controlを付ける。
+        // 同じお客様が続けてやり取りする間(数分以内)は、2回目以降キャッシュが効く
+        const cachedSystem = [{ type: "text", text: system, cache_control: { type: "ephemeral" } }];
         const content = await streamAnthropicCall(
-          { model: "claude-sonnet-4-6", max_tokens: 60000, system, tools, messages: requestBody.messages },
+          { model: "claude-sonnet-4-6", max_tokens: 60000, system: cachedSystem, tools, messages: requestBody.messages },
           apiKey, controller, encoder
         );
         controller.enqueue(encoder.encode(JSON.stringify({ type: "final", content }) + "\n"));
-      } catch (err) {
+      } catch (err){
         controller.enqueue(encoder.encode(JSON.stringify({ type: "error", error: err.message }) + "\n"));
       }
       controller.close();
