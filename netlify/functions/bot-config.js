@@ -149,7 +149,8 @@ exports.handler = async (event) => {
       }
       const existing = (await store.get(req.botId, { type: "json" })) || { botId: req.botId };
       const adminPassword = generatePassword();
-      const updated = { ...existing, adminPassword };
+      const adminPasswordExpiresAt = Date.now() + 15 * 60 * 1000; // 15分の有効期限
+      const updated = { ...existing, adminPassword, adminPasswordExpiresAt };
       await store.setJSON(req.botId, updated);
       return { statusCode: 200, headers, body: JSON.stringify({ adminPassword }) };
     }
