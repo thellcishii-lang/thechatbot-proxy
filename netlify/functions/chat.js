@@ -67,6 +67,7 @@ async function checkRateLimit(ip, applyBlacklist) {
 
     return { allowed: true };
   } catch (e) {
+    console.error("checkRateLimit failed:", e.message);
     return { allowed: true }; // 判定自体が失敗しても本来の機能は止めない
   }
 }
@@ -157,53 +158,39 @@ async function recordTopicRelevance(ip, relevant, botConfigId, customerId) {
 
     await store.setJSON(ip, { ...record, offTopicStreak: streak, offTopicResetCount: resetCount, blacklisted });
   } catch (e) {
+    console.error("recordTopicRelevance failed:", e.message);
     // 判定・記録に失敗しても、本来のチャット機能は止めない
   }
 }
 
-// Zoeがtrack_topic_relevanceツールを呼んだ場合、それをフロントに見せず
-// サーバー側だけで処理し(recordTopicRelevanceを実行)、続きの応答を改めて取得する。
-// このツールと他のツールが同じ応答内で同時に呼ばれた場合は、判定だけ記録した上で
-// そのままフロントに返し、他のツールの実行はこれまで通りフロント側に任せる。
+// Zoeがtrack_topic_relevanceツールを呼んだ場合、それをフロントに見せずサーバー側だけで
+// 処理する(recordTopicRelevanceを実行)。以前はこの判定だけのために追加でもう1往復
+// 呼び出す設計だったが、判定はテキスト応答や他のツール呼び出しと同じ応答内で同時に
+// 行わせる形に変更したため、追加の呼び出しは不要になった(1回の呼び出しで完結する)。
 async function callAnthropicWithTopicTracking(anthropicRequest, apiKey, clientIp, botConfigId, customerId) {
-  let messages = anthropicRequest.messages.slice();
-  for (let i = 0; i < 4; i++) {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({ ...anthropicRequest, messages }),
-    });
-    const data = await response.json();
-    if (data.error || !data.content) {
-      return { status: response.status, data };
-    }
-
-    const toolUseBlocks = data.content.filter((b) => b.type === "tool_use");
-    const relevanceBlock = toolUseBlocks.find((b) => b.name === "track_topic_relevance");
-    if (!relevanceBlock) {
-      return { status: response.status, data };
-    }
-
-    await recordTopicRelevance(clientIp, !!relevanceBlock.input.relevant, botConfigId, customerId);
-
-    if (toolUseBlocks.length > 1) {
-      // 他のツールと同時に呼ばれてしまった場合は、記録だけ済ませてそのままフロントに返す
-      return { status: response.status, data };
-    }
-
-    messages = messages.concat([
-      { role: "assistant", content: data.content },
-      { role: "user", content: [{ type: "tool_result", tool_use_id: relevanceBlock.id, content: "記録しました" }] },
-    ]);
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify(anthropicRequest),
+    signal: AbortSignal.timeout(60000), // Anthropicが無応答になった場合の保険(このパスはツールループを伴わないため長時間は想定しない)
+  });
+  const data = await response.json();
+  if (data.error || !data.content) {
+    return { status: response.status, data };
   }
-  return {
-    status: 200,
-    data: { content: [{ type: "text", text: "処理が複雑すぎたため、途中で打ち切りました。もう一度お試しください。" }] },
-  };
+
+  const relevanceBlock = data.content.find((b) => b.type === "tool_use" && b.name === "track_topic_relevance");
+  if (relevanceBlock) {
+    await recordTopicRelevance(clientIp, !!relevanceBlock.input.relevant, botConfigId, customerId);
+    // お客様(フロント)には、この内部判定ツールの呼び出しを一切見せない
+    data.content = data.content.filter((b) => b !== relevanceBlock);
+  }
+
+  return { status: response.status, data };
 }
 
 // ============================================================
@@ -219,6 +206,7 @@ async function checkIpAbuse(ip) {
     const record = await store.get(ip, { type: "json" });
     return !!(record && record.blacklisted);
   } catch (e) {
+    console.error("checkIpAbuse failed:", e.message);
     return false;
   }
 }
@@ -235,6 +223,7 @@ async function recordIpAbuseStrike(ip) {
     const blacklisted = strikes >= 3;
     await store.setJSON(ip, { ...record, strikes, blacklisted });
   } catch (e) {
+    console.error("recordIpAbuseStrike failed:", e.message);
     // 記録に失敗しても本来の処理は止めない
   }
 }
@@ -310,7 +299,7 @@ const SALES_SYSTEM_PROMPT = `あなたは「Zoe(ゾーイ)」という、the.cha
 5. 情報が十分に得られない、または内容確認で明確な同意が得られない場合、担当者への引き継ぎは行わない。ただしこの場合も、send_emailツールでthe.chatbot.zoe@gmail.com宛に「確認が取れないまま会話が終了した」旨と、分かっている範囲の情報・会話の要約を送信する。お客様には無理に情報を聞き出そうとせず、自然に会話を締めくくってよい
 
 # 内部判定について(お客様には見せない)
-- 訪問者から新しいメッセージが届いたら、他の応答より先に、track_topic_relevanceツールを単独で呼び、その発言がthe.chatBOT導入に関する話かどうかを判定すること。困りごと相談・機能質問・料金・申込み・資料請求・軽い相槌や雑談程度の反応はすべてrelevant:trueでよい。サービスと全く関係のない話題(荒らし目的の連投、無関係な質問の連続等)のみrelevant:falseとする
+- 訪問者から新しいメッセージが届いたら、track_topic_relevanceツールを、通常の返答(テキスト)や他のツール呼び出しと同時に、この応答の中で1回呼び、その発言がthe.chatBOT導入に関する話かどうかを判定すること。困りごと相談・機能質問・料金・申込み・資料請求・軽い相槌や雑談程度の反応はすべてrelevant:trueでよい。サービスと全く関係のない話題(荒らし目的の連投、無関係な質問の連続等)のみrelevant:falseとする
 - このツールを呼んだこと自体、判定結果も、お客様には一切明かさない
 
 # トーンと制約
@@ -363,7 +352,7 @@ const SALES_TOOLS = [
   },
   {
     name: "track_topic_relevance",
-    description: "内部専用・お客様には一切見えない判定ツール。訪問者の直近の発言が、the.chatBOT導入に関する話(困りごと相談、機能質問、料金、申込み、資料請求、雑談程度の相槌なども含む)かどうかを判定するために、あなたの応答の一部として毎回1回だけ呼ぶ。他のツールと同時に呼ばず、単独で呼ぶこと。呼んだことは絶対にお客様に伝えない。",
+    description: "内部専用・お客様には一切見えない判定ツール。訪問者の直近の発言が、the.chatBOT導入に関する話(困りごと相談、機能質問、料金、申込み、資料請求、雑談程度の相槌なども含む)かどうかを判定するために使う。判定のためだけに応答を止める必要はなく、通常の返答(テキスト)や他のツール呼び出しと同時に、この応答の中で1回呼ぶこと。呼んだことは絶対にお客様に伝えない。",
     input_schema: {
       type: "object",
       properties: {
@@ -906,11 +895,16 @@ const SECRETARY_TOOLS = [
   },
 ];
 
+// 内部Function間の通信(bot-config.js/customer.js等)向け:相手が無応答になった場合に
+// Netlify Functionsのリソースを専有し続けないよう、短めのタイムアウトを設定する
+const INTERNAL_FETCH_TIMEOUT_MS = 10000; // 10秒
+
 async function callBotConfig(body) {
   const res = await fetch("https://chatbot-proxy.netlify.app/.netlify/functions/bot-config", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...body, secret: process.env.INTERNAL_FUNCTION_SECRET }),
+    signal: AbortSignal.timeout(INTERNAL_FETCH_TIMEOUT_MS),
   });
   return await res.json();
 }
@@ -920,6 +914,7 @@ async function callCustomerAdmin(body) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...body, secret: process.env.INTERNAL_FUNCTION_SECRET }),
+    signal: AbortSignal.timeout(INTERNAL_FETCH_TIMEOUT_MS),
   });
   return await res.json();
 }
@@ -946,6 +941,7 @@ async function callTrackEvent(body) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...body, secret: process.env.INTERNAL_FUNCTION_SECRET }),
+    signal: AbortSignal.timeout(INTERNAL_FETCH_TIMEOUT_MS),
   });
   return await res.json();
 }
@@ -955,6 +951,7 @@ async function callSecretaryMemory(body) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...body, secret: process.env.INTERNAL_FUNCTION_SECRET }),
+    signal: AbortSignal.timeout(INTERNAL_FETCH_TIMEOUT_MS),
   });
   return await res.json();
 }
@@ -1088,6 +1085,7 @@ async function executeSecretaryTool(name, input, requesterIp) {
         const res = await fetch("https://chatbot-proxy.netlify.app/.netlify/functions/expire-applications", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(INTERNAL_FETCH_TIMEOUT_MS),
           body: JSON.stringify({
             secret: process.env.INTERNAL_FUNCTION_SECRET,
             testId: input.id,
@@ -1167,6 +1165,7 @@ async function executeSecretaryTool(name, input, requesterIp) {
           const res = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
+            signal: AbortSignal.timeout(INTERNAL_FETCH_TIMEOUT_MS),
             body: JSON.stringify(input.payload),
           });
           results.push(res.status);
@@ -1202,6 +1201,7 @@ async function isValidAdminSession(sessionToken) {
     if (!record) return false;
     return Date.now() < record.expiresAt;
   } catch (e) {
+    console.error("isValidAdminSession failed:", e.message);
     return false;
   }
 }
@@ -1252,6 +1252,7 @@ async function runSecretaryAgent(messages, requesterIp) {
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
+      signal: AbortSignal.timeout(60000),
       body: JSON.stringify({
         model: "claude-sonnet-5",
         max_tokens: 1500,
@@ -1455,11 +1456,11 @@ exports.handler = async (event) => {
         return { statusCode: 200, headers, body: JSON.stringify({ content: [{ type: "text", text: "現在、このチャットはご利用いただけません。" }] }) };
       }
       const knowledge = (cust.record.productionKnowledge || "").trim();
-      anthropicRequest.system = `あなたは「${cust.record.chatDisplayName || "Zoe"}」という対話型AIです。${cust.record.customerName || "御社"}の窓口として、以下の知識をもとに、お客様からの質問に丁寧に答えてください。\n\n# 知識\n${knowledge || "(まだ知識が登録されていません)"}\n\n# 制約\n- 分からないことは正直に「分かりかねます」と伝え、担当者への確認を案内する\n- 1回の返信は簡潔に(3〜5文程度)\n\n# 内部判定について(お客様には見せない)\n- 訪問者から新しいメッセージが届いたら、他の応答より先に、track_topic_relevanceツールを単独で呼び、その発言が御社への問い合わせとして自然な内容かどうかを判定すること。判定結果はお客様に一切明かさない`;
+      anthropicRequest.system = `あなたは「${cust.record.chatDisplayName || "Zoe"}」という対話型AIです。${cust.record.customerName || "御社"}の窓口として、以下の知識をもとに、お客様からの質問に丁寧に答えてください。\n\n# 知識\n${knowledge || "(まだ知識が登録されていません)"}\n\n# 制約\n- 分からないことは正直に「分かりかねます」と伝え、担当者への確認を案内する\n- 1回の返信は簡潔に(3〜5文程度)\n\n# 内部判定について(お客様には見せない)\n- 訪問者から新しいメッセージが届いたら、track_topic_relevanceツールを、通常の返答や他のツール呼び出しと同時に、この応答の中で1回呼び、その発言が御社への問い合わせとして自然な内容かどうかを判定すること。判定結果はお客様に一切明かさない`;
       anthropicRequest.tools = [
         {
           name: "track_topic_relevance",
-          description: "内部専用・お客様には一切見えない判定ツール。訪問者の直近の発言が、御社への問い合わせとして自然な内容かどうかを判定するために、あなたの応答の一部として毎回1回だけ呼ぶ。他のツールと同時に呼ばない。",
+          description: "内部専用・お客様には一切見えない判定ツール。訪問者の直近の発言が、御社への問い合わせとして自然な内容かどうかを判定するために使う。通常の返答や他のツール呼び出しと同時に、この応答の中で1回呼ぶ。",
           input_schema: {
             type: "object",
             properties: {
@@ -1481,6 +1482,21 @@ exports.handler = async (event) => {
       anthropicRequest.tool_choice = requestBody.tool_choice;
     }
 
+    // プロンプトキャッシュ対応:systemプロンプト(文字列)を、末尾にcache_controlを
+    // 付けた配列形式に変換し、tools配列にも末尾にcache_controlを付ける。
+    // これにより、同じsystem/toolsが続く限り、2回目以降はキャッシュヒットして
+    // 処理コスト・応答速度の両方が改善する(1,000トークン未満の短いプロンプトでは
+    // 効果が薄いが、害もないので一律で適用する)
+    if (typeof anthropicRequest.system === "string" && anthropicRequest.system.length > 0) {
+      anthropicRequest.system = [{ type: "text", text: anthropicRequest.system, cache_control: { type: "ephemeral" } }];
+    }
+    if (Array.isArray(anthropicRequest.tools) && anthropicRequest.tools.length > 0) {
+      const lastIndex = anthropicRequest.tools.length - 1;
+      anthropicRequest.tools = anthropicRequest.tools.map((tool, i) =>
+        i === lastIndex ? { ...tool, cache_control: { type: "ephemeral" } } : tool
+      );
+    }
+
     // zoe-chat(Zoe001)・zoe-production(顧客の本番チャット)はブラックリスト判定対象のため、
     // track_topic_relevanceツールの呼び出しをここでサーバー側だけで処理し、フロントには見せない
     if (requestBody.mode === "zoe-chat" || requestBody.mode === "zoe-production") {
@@ -1498,6 +1514,7 @@ exports.handler = async (event) => {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify(anthropicRequest),
+      signal: AbortSignal.timeout(300000), // 5分。web_search/code_execution等で時間がかかる場合の保険として長めに設定
     });
     const data = await response.json();
     return {
