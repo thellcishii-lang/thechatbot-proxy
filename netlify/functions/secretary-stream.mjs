@@ -25,6 +25,7 @@ async function checkIpAbuse(ip) {
     const record = await store.get(ip, { type: "json" });
     return !!(record && record.blacklisted);
   } catch (e) {
+    console.error("checkIpAbuse failed:", e.message);
     return false;
   }
 }
@@ -41,6 +42,7 @@ async function recordIpAbuseStrike(ip) {
     const blacklisted = strikes >= 3;
     await store.setJSON(ip, { ...record, strikes, blacklisted });
   } catch (e) {
+    console.error("recordIpAbuseStrike failed:", e.message);
     // 記録に失敗しても本来の処理は止めない
   }
 }
@@ -57,6 +59,7 @@ async function isValidAdminSession(sessionToken) {
     if (!record) return false;
     return Date.now() < record.expiresAt;
   } catch (e) {
+    console.error("isValidAdminSession failed:", e.message);
     return false;
   }
 }
@@ -509,10 +512,13 @@ const SECRETARY_TOOLS = [
   },
 ];
 
+const INTERNAL_FETCH_TIMEOUT_MS = 10000; // 10秒。内部Function間通信が無応答になった場合の保険
+
 async function callBotConfig(body) {
   const res = await fetch("https://chatbot-proxy.netlify.app/.netlify/functions/bot-config", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(INTERNAL_FETCH_TIMEOUT_MS),
     body: JSON.stringify({ ...body, secret: process.env.INTERNAL_FUNCTION_SECRET }),
   });
   return await res.json();
@@ -522,6 +528,7 @@ async function callCustomerAdmin(body) {
   const res = await fetch("https://chatbot-proxy.netlify.app/.netlify/functions/customer", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(INTERNAL_FETCH_TIMEOUT_MS),
     body: JSON.stringify({ ...body, secret: process.env.INTERNAL_FUNCTION_SECRET }),
   });
   return await res.json();
@@ -548,6 +555,7 @@ async function callTrackEvent(body) {
   const res = await fetch("https://chatbot-proxy.netlify.app/.netlify/functions/track-event", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(INTERNAL_FETCH_TIMEOUT_MS),
     body: JSON.stringify({ ...body, secret: process.env.INTERNAL_FUNCTION_SECRET }),
   });
   return await res.json();
@@ -557,6 +565,7 @@ async function callSecretaryMemory(body) {
   const res = await fetch("https://chatbot-proxy.netlify.app/.netlify/functions/secretary-memory", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(INTERNAL_FETCH_TIMEOUT_MS),
     body: JSON.stringify({ ...body, secret: process.env.INTERNAL_FUNCTION_SECRET }),
   });
   return await res.json();
@@ -691,6 +700,7 @@ async function executeSecretaryTool(name, input, requesterIp) {
         const res = await fetch("https://chatbot-proxy.netlify.app/.netlify/functions/expire-applications", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(INTERNAL_FETCH_TIMEOUT_MS),
           body: JSON.stringify({
             secret: process.env.INTERNAL_FUNCTION_SECRET,
             testId: input.id,
@@ -770,6 +780,7 @@ async function executeSecretaryTool(name, input, requesterIp) {
           const res = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
+            signal: AbortSignal.timeout(INTERNAL_FETCH_TIMEOUT_MS),
             body: JSON.stringify(input.payload),
           });
           results.push(res.status);
@@ -825,6 +836,7 @@ async function checkShortRateLimit(ip) {
     await store.setJSON(ip, { ...record, shortStart, shortCount });
     return shortCount <= SHORT_LIMIT;
   } catch (e) {
+    console.error("checkShortRateLimit failed:", e.message);
     return true;
   }
 }
@@ -841,6 +853,7 @@ async function streamAnthropicCall(anthropicRequestBody, apiKey, controller, enc
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({ ...anthropicRequestBody, stream: true }),
+    signal: AbortSignal.timeout(600000), // 10分。Anthropic側が完全に無応答になった場合の保険
   });
   if (!res.ok || !res.body) {
     const errText = await res.text().catch(() => "");
@@ -873,7 +886,7 @@ async function streamAnthropicCall(anthropicRequestBody, apiKey, controller, enc
       const line = rawEvent.split("\n").find((l) => l.startsWith("data:"));
       if (!line) continue;
       const jsonStr = line.slice(5).trim();
-      if (!jsonStr || jsonStr === "[DONE]") continue;
+      if (!jsonStr) continue;
       let evt;
       try {
         evt = JSON.parse(jsonStr);
@@ -902,6 +915,7 @@ async function streamAnthropicCall(anthropicRequestBody, apiKey, controller, enc
           try {
             b.input = b._partialJson ? JSON.parse(b._partialJson) : {};
           } catch (e) {
+            console.error(`tool_use入力のJSONパースに失敗しました(tool: ${b.name || "unknown"}):`, e.message, "raw:", b._partialJson);
             b.input = {};
           }
           delete b._partialJson;
@@ -989,19 +1003,27 @@ export default async (req, context) => {
                 : "(まだ何も保存されていません)";
             }
           } catch (e) {}
-          const systemPromptWithMemory = SECRETARY_SYSTEM_PROMPT + `\n\n# 現在保存されている記憶(メモ)一覧\n${memoryListingText}`;
+          // プロンプトキャッシュ対応:固定部分(SECRETARY_SYSTEM_PROMPT)と、
+          // 会話のたびに変わりうる可変部分(記憶一覧)を別ブロックに分け、
+          // それぞれにcache_controlを付ける。固定部分は毎回同じなので常にキャッシュが
+          // 効き、可変部分も同じ会話(最大20ラウンドのループ)の中では変わらないため、
+          // ループ内の2ラウンド目以降はそちらもキャッシュが効く
+          const cachedSystem = [
+            { type: "text", text: SECRETARY_SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
+            { type: "text", text: `# 現在保存されている記憶(メモ)一覧\n${memoryListingText}`, cache_control: { type: "ephemeral" } },
+          ];
           const tools = [
             ...SECRETARY_TOOLS,
             { type: "web_search_20260209", name: "web_search" },
             { type: "web_fetch_20260209", name: "web_fetch" },
-            { type: "code_execution_20260120", name: "code_execution" },
+            { type: "code_execution_20260120", name: "code_execution", cache_control: { type: "ephemeral" } },
           ];
 
           let finalContent = null;
           const collectedImages = [];
           for (let i = 0; i < 20; i++) {
             const content = await streamAnthropicCall(
-              { model: "claude-sonnet-5", max_tokens: 60000, system: systemPromptWithMemory, tools, messages: currentMessages },
+              { model: "claude-sonnet-5", max_tokens: 60000, system: cachedSystem, tools, messages: currentMessages },
               apiKey, controller, encoder
             );
             collectedImages.push(...extractImages(content));
