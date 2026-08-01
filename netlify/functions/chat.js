@@ -1326,12 +1326,24 @@ exports.handler = async (event) => {
       try {
         if (requestBody.mode === "zoe-chat") {
           const cfg = await callBotConfig({ action: "get", botId: "Zoe001" });
-          if (cfg.record && cfg.record.adminPassword && cfg.record.adminPassword === requestBody.adminPassword) {
+          if (
+            cfg.record &&
+            cfg.record.adminPassword &&
+            cfg.record.adminPassword === requestBody.adminPassword &&
+            cfg.record.adminPasswordExpiresAt &&
+            Date.now() < cfg.record.adminPasswordExpiresAt
+          ) {
             adminBypass = true;
           }
         } else if ((requestBody.mode === "zoe-setup" || requestBody.mode === "zoe-application" || requestBody.mode === "zoe-production") && requestBody.id) {
           const cust = await callCustomerAdmin({ action: "adminGet", id: requestBody.id });
-          if (cust.record && cust.record.adminPassword && cust.record.adminPassword === requestBody.adminPassword) {
+          if (
+            cust.record &&
+            cust.record.adminPassword &&
+            cust.record.adminPassword === requestBody.adminPassword &&
+            cust.record.adminPasswordExpiresAt &&
+            Date.now() < cust.record.adminPasswordExpiresAt
+          ) {
             adminBypass = true;
           }
         }
