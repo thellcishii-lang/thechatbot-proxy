@@ -54,8 +54,20 @@ module.exports = async (req, res) => {
 
   try {
     const { password } = req.body || {};
-    if (!process.env.ADMIN_PASSWORD || password !== process.env.ADMIN_PASSWORD) {
-      res.status(401).json({ error: "パスワードが違います" });
+    const stored = process.env.ADMIN_PASSWORD || "";
+    const received = password || "";
+    if (!stored || received !== stored) {
+      // 一時的な診断情報:パスワードの中身は一切含めず、文字数と
+      // 前後の空白を除いた場合に一致するかどうかだけを返す
+      res.status(401).json({
+        error: "パスワードが違います",
+        debug: {
+          receivedLength: received.length,
+          storedLength: stored.length,
+          matchesWhenTrimmed: received.trim() === stored.trim(),
+          storedIsEmpty: stored.length === 0,
+        },
+      });
       return;
     }
     res.status(200).json({ ok: true });
