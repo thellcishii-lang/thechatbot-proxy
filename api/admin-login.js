@@ -1,10 +1,17 @@
 // api/admin-login.js (Vercel版)
 //
-// 秘書Zoe(管理画面)の第一段階の認証:管理者パスワードのチェックだけを行います。
-// これが通った後、ブラウザ側でFace ID(WebAuthn)による第二段階の認証に進みます。
-// 保存先(レート制限)はNetlify BlobsからUpstash Redisに切り替え。ロジック自体は変更ありません。
+// 秘書Zoe(管理画面)の認証です。
+//
+// 【一時措置・2026年8月2日】Face ID(WebAuthn)まわりの不具合の切り分けが
+// 終わるまでの間、パスワード確認が通った時点でそのままログインセッションを
+// 発行し、Face ID認証のステップを一時的にスキップしています。原因が分かり
+// 次第、必ずFace ID必須の状態に戻してください(パスワードだけでは、パスワードが
+// 漏れた場合に誰でも秘書Zoeを操作できてしまいます)。
 
 const { kv } = require("@vercel/kv");
+const crypto = require("crypto");
+
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12時間
 
 function getClientIp(req) {
   const xff = req.headers["x-forwarded-for"];
@@ -57,20 +64,15 @@ module.exports = async (req, res) => {
     const stored = process.env.ADMIN_PASSWORD || "";
     const received = password || "";
     if (!stored || received !== stored) {
-      // 一時的な診断情報:パスワードの中身は一切含めず、文字数と
-      // 前後の空白を除いた場合に一致するかどうかだけを返す
-      res.status(401).json({
-        error: "パスワードが違います",
-        debug: {
-          receivedLength: received.length,
-          storedLength: stored.length,
-          matchesWhenTrimmed: received.trim() === stored.trim(),
-          storedIsEmpty: stored.length === 0,
-        },
-      });
+      res.status(401).json({ error: "パスワードが違います" });
       return;
     }
-    res.status(200).json({ ok: true });
+
+    // 【一時措置】Face IDを経ずに、ここでセッションを発行する
+    const sessionToken = crypto.randomBytes(32).toString("hex");
+    await kv.set(`admin-session:${sessionToken}`, { createdAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_MS });
+
+    res.status(200).json({ ok: true, sessionToken });
   } catch (err) {
     res.status(500).json({ error: "内部エラー: " + err.message });
   }
