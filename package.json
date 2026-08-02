@@ -1,10 +1,8 @@
 {
-  "name": "chatbot-proxy",
+  "name": "thechatbot-proxy",
   "version": "1.0.0",
+  "private": true,
   "dependencies": {
-    "@netlify/blobs": "^7.0.0",
-    "@simplewebauthn/server": "^9.0.3",
-    "docx": "^9.6.1",
-    "nodemailer": "^6.9.14"
+    "@vercel/kv": "^2.0.0"
   }
 }
