@@ -281,6 +281,7 @@ const SECRETARY_SYSTEM_PROMPT = `あなたは「秘書Zoe」です。the合同�
 17. 「6日目/8日目のメールテストして」「(6桁ID)で決済リマインドを試して」のように言われたら、test_expire_emailツールで指定されたIDと経過日数(6または8)を渡し、実際の待ち時間なしでリマインド・最終通知メールの送信をテストする
 18. 設定管理(BASEチャット/bot別/顧客別)について:「BASEチャットの〇〇を△△にして」→scope:"base"でset_setting、「Zoe001の〇〇を△△にして」→scope:"bot",id:"Zoe001"、「(6桁ID)の〇〇だけ△△にして」→scope:"customer",id:6桁IDでset_setting(自動でロックされる)。「(6桁ID)のブラックリスト変更ロック/ロック解除」と言われたらset_customer_settings_lockを使う。設定の優先順位は「顧客個別(ロック時)→bot別→BASEチャット」の順で、顧客個別に何か設定するとそのIDは自動的にロックされ、以後BASEチャットやbot別の変更が届かなくなることを、運営者に伝えておくとよい
 19. 「(function名)のレート制限テストして」と言われたら、test_rate_limitツールで該当のFunctionに繰り返しリクエストを送り、制限が発動する回数を確認する。send-emailをテストする場合は、実際にメールが送信されてしまうため、宛先(to)は運営者のメールアドレス(the.chatbot.zoe@gmail.com)など安全な宛先を使い、件名に「テスト」と分かるように入れること
+20. Vercel移行中など、Netlify以外のURLに対してテストしたい場合は、test_api_callツールでURLとリクエスト内容を渡し、結果(ステータスコード・レスポンス本文)を確認する
 
 # トーンと制約
 - 簡潔で、業務的だが丁寧な話し方
@@ -508,6 +509,18 @@ const SECRETARY_TOOLS = [
         times: { type: "number", description: "何回連続で送信するか(例: 25)" },
       },
       required: ["functionName", "payload", "times"],
+    },
+  },
+  {
+    name: "test_api_call",
+    description: "任意のURL(Vercel移行中のAPIなど、Netlify以外のエンドポイントも含む)に1回POSTリクエストを送り、結果(ステータスコード・レスポンス内容)を確認する。運営者が「(URL)に(内容)でテストして」等と言った場合に使う。",
+    input_schema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "リクエスト先の完全なURL(例: https://thechatbot-proxy.vercel.app/api/customer)" },
+        payload: { type: "object", description: "送信するリクエストボディ(JSON)" },
+      },
+      required: ["url", "payload"],
     },
   },
 ];
@@ -794,6 +807,25 @@ async function executeSecretaryTool(name, input, requesterIp) {
           blockedAtRequestNumber: blockedAt === -1 ? null : blockedAt + 1,
           note: blockedAt === -1 ? "指定回数内では制限が発動しませんでした" : `${blockedAt + 1}回目で制限が発動しました(status ${results[blockedAt]})`,
         });
+      } catch (e) {
+        return "テスト実行中にエラーが発生しました: " + e.message;
+      }
+    }
+    if (name === "test_api_call") {
+      try {
+        const res = await fetch(input.url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(INTERNAL_FETCH_TIMEOUT_MS),
+          body: JSON.stringify(input.payload),
+        });
+        let bodyText;
+        try {
+          bodyText = await res.text();
+        } catch (e2) {
+          bodyText = "(本文の取得に失敗)";
+        }
+        return JSON.stringify({ url: input.url, status: res.status, body: bodyText });
       } catch (e) {
         return "テスト実行中にエラーが発生しました: " + e.message;
       }
