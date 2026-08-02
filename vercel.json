@@ -1,4 +1,9 @@
 {
+  "functions": {
+    "api/**/*.js": {
+      "maxDuration": 300
+    }
+  },
   "crons": [
     {
       "path": "/api/expire-applications",
