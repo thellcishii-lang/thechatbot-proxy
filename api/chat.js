@@ -895,6 +895,18 @@ const SECRETARY_TOOLS = [
       required: ["functionName", "payload", "times"],
     },
   },
+  {
+    name: "issue_test_code",
+    description: "テスト用の決済迂回コードを発行する。運営者が「テストコード出して」「テスト迂回コード発行して」等と言った場合に使う。発行時に指定した会社名(顧客名)とメールアドレスで申し込み、かつそのコードを入力した場合にのみ有効になる(3点照合)。有効回数2回・有効期限7日。発行したコードは運営者本人にのみ伝えること。",
+    input_schema: {
+      type: "object",
+      properties: {
+        customerName: { type: "string", description: "申込みに使う会社名(顧客名)。申込み時の入力と完全に一致する必要がある" },
+        email: { type: "string", description: "申込みに使うメールアドレス" },
+      },
+      required: ["customerName", "email"],
+    },
+  },
 ];
 
 // 内部Function間の通信(bot-config.js/customer.js等)向け:相手が無応答になった場合に
@@ -1179,6 +1191,25 @@ async function executeSecretaryTool(name, input, requesterIp) {
       } catch (e) {
         return "テスト実行中にエラーが発生しました: " + e.message;
       }
+    }
+    if (name === "issue_test_code") {
+      const data = await callCustomerAdmin({
+        action: "issueTestCode",
+        customerName: input.customerName,
+        email: input.email,
+      });
+      if (!data.code) {
+        return "発行に失敗しました: " + (data.error || "不明なエラー");
+      }
+      return (
+        `テスト迂回コードを発行しました。\n` +
+        `コード: ${data.code}\n` +
+        `対象会社名: ${data.customerName}\n` +
+        `対象メール: ${data.email}\n` +
+        `有効回数: ${data.remaining}回\n` +
+        `有効期限: ${data.expiresAt}\n\n` +
+        `申込み画面のURLの末尾に ?tc=${data.code} を付けてアクセスすると適用されます。`
+      );
     }
     return "不明なツールです";
   } catch (e) {
