@@ -17,6 +17,24 @@ function generateId() {
   return String(Math.floor(100000 + Math.random() * 900000)); // 6桁の数字
 }
 
+function generateTestCode() {
+  // 紛らわしい文字を除いた32種 × 10桁。総当たりは現実的に不可能な空間サイズ
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let s = "";
+  for (let i = 0; i < 10; i++) {
+    s += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return "T" + s; // 先頭のTは目視判別用
+}
+
+function normalizeEmail(v) {
+  return String(v || "").trim().toLowerCase();
+}
+
+function normalizeName(v) {
+  return String(v || "").trim();
+}
+
 function generatePassword() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // 紛らわしい文字(0,O,1,I)を除外
   let pw = "";
@@ -503,6 +521,116 @@ module.exports = async (req, res) => {
       await kv.set(`customer:${reqBody.id}`, updated);
       const { password, ...safeUpdated } = updated;
       res.status(200).json({ record: safeUpdated });
+      return;
+    }
+
+    // ⑰ 秘書Zoe専用:テスト用の決済迂回コードを発行する
+    //
+    //   このコードは「顧客名 + メールアドレス + コード」の3点が揃った時だけ有効。
+    //   コード単体が漏れても、その顧客名・メールで申し込まない限り使えない。
+    //   有効回数2回・有効期限7日(Redisのex指定で自動失効)。
+    if (reqBody.action === "issueTestCode") {
+      if (!process.env.INTERNAL_FUNCTION_SECRET || reqBody.secret !== process.env.INTERNAL_FUNCTION_SECRET) {
+        res.status(401).json({ error: "許可されていません" });
+        return;
+      }
+      const customerName = normalizeName(reqBody.customerName);
+      const email = normalizeEmail(reqBody.email);
+      if (!customerName || !email) {
+        res.status(400).json({ error: "customerNameとemailの両方が必要です" });
+        return;
+      }
+
+      const TTL_SECONDS = 7 * 24 * 60 * 60; // 7日
+      let code;
+      do {
+        code = generateTestCode();
+      } while (await kv.get(`testcode:${code}`));
+
+      const expiresAt = new Date(Date.now() + TTL_SECONDS * 1000).toISOString();
+      await kv.set(
+        `testcode:${code}`,
+        {
+          customerName,
+          email,
+          remaining: 2,
+          issuedAt: new Date().toISOString(),
+          expiresAt,
+          usedAt: [],
+        },
+        { ex: TTL_SECONDS }
+      );
+
+      res.status(200).json({ code, customerName, email, remaining: 2, expiresAt });
+      return;
+    }
+
+    // ⑱ テスト迂回コードの照合(申込み画面から呼ばれる公開アクション)
+    //
+    //   照合はここ(サーバー側)でのみ行う。ブラウザ側には判定結果しか返さない。
+    //   失敗理由は一切返さない(コードの存在有無を推測させないため)。
+    if (reqBody.action === "redeemTestCode") {
+      const code = String(reqBody.code || "").trim().toUpperCase();
+      const id = String(reqBody.id || "").trim();
+      const customerName = normalizeName(reqBody.customerName);
+      const email = normalizeEmail(reqBody.email);
+
+      if (!code || !id || !customerName || !email) {
+        res.status(200).json({ valid: false });
+        return;
+      }
+
+      const entry = await kv.get(`testcode:${code}`);
+      if (!entry) {
+        await recordIpAbuseStrike(clientIp); // 存在しないコードの入力は総当たりの疑いとして記録
+        res.status(200).json({ valid: false });
+        return;
+      }
+
+      // 3点照合 + 期限 + 残回数
+      const expired = entry.expiresAt && new Date(entry.expiresAt).getTime() < Date.now();
+      if (
+        entry.customerName !== customerName ||
+        entry.email !== email ||
+        expired ||
+        !(entry.remaining > 0)
+      ) {
+        await recordIpAbuseStrike(clientIp);
+        res.status(200).json({ valid: false });
+        return;
+      }
+
+      const record = await kv.get(`customer:${id}`);
+      if (!record) {
+        res.status(200).json({ valid: false });
+        return;
+      }
+
+      // 通常の決済完了(markPaid)と同じ状態にし、テスト客であることを記録する
+      const updated = {
+        ...record,
+        paid: true,
+        paidAt: new Date().toISOString(),
+        isTest: true,
+        testCode: code,
+      };
+      await kv.set(`customer:${id}`, updated);
+
+      // 残回数を1つ減らす(有効期限は元のまま維持する)
+      const remainSeconds = entry.expiresAt
+        ? Math.max(60, Math.floor((new Date(entry.expiresAt).getTime() - Date.now()) / 1000))
+        : 60 * 60;
+      await kv.set(
+        `testcode:${code}`,
+        {
+          ...entry,
+          remaining: entry.remaining - 1,
+          usedAt: [...(entry.usedAt || []), { id, at: new Date().toISOString() }],
+        },
+        { ex: remainSeconds }
+      );
+
+      res.status(200).json({ valid: true, remaining: entry.remaining - 1 });
       return;
     }
 
