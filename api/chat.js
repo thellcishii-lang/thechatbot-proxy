@@ -1307,6 +1307,7 @@ async function runSecretaryAgent(messages, requesterIp) {
       }),
     });
     const data = await response.json();
+    logUsage(`secretary-round${i + 1}`, data);
     if (data.error) return { text: "エラーが発生しました: " + JSON.stringify(data.error), images: [] };
 
     collectedImages.push(...extractImages(data.content));
