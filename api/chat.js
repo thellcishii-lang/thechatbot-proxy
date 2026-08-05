@@ -154,6 +154,22 @@ async function recordTopicRelevance(ip, relevant, botConfigId, customerId) {
 // 処理する(recordTopicRelevanceを実行)。以前はこの判定だけのために追加でもう1往復
 // 呼び出す設計だったが、判定はテキスト応答や他のツール呼び出しと同じ応答内で同時に
 // 行わせる形に変更したため、追加の呼び出しは不要になった(1回の呼び出しで完結する)。
+// APIの応答に元々含まれている使用量(トークン実数)を、Vercelのログに出すだけの関数。
+// 保存はしない。プロンプトキャッシュが実際に効いているか(cache_readに数字が入るか)と、
+// 1往復あたりの実原価を確認するためだけに使う。追加のAPI呼び出しは発生しない。
+function logUsage(label, data) {
+  try {
+    const u = data && data.usage;
+    if (!u) return;
+    console.log(
+      `[usage] ${label} in=${u.input_tokens || 0} out=${u.output_tokens || 0} ` +
+      `cache_write=${u.cache_creation_input_tokens || 0} cache_read=${u.cache_read_input_tokens || 0}`
+    );
+  } catch (e) {
+    // ログ出力の失敗で本来の処理は止めない
+  }
+}
+
 async function callAnthropicWithTopicTracking(anthropicRequest, apiKey, clientIp, botConfigId, customerId) {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -166,6 +182,7 @@ async function callAnthropicWithTopicTracking(anthropicRequest, apiKey, clientIp
     signal: AbortSignal.timeout(60000), // Anthropicが無応答になった場合の保険(このパスはツールループを伴わないため長時間は想定しない)
   });
   const data = await response.json();
+  logUsage(customerId ? "zoe-production" : "zoe-chat", data);
   if (data.error || !data.content) {
     return { status: response.status, data };
   }
@@ -1517,6 +1534,23 @@ module.exports = async (req, res) => {
       );
     }
 
+    // 会話履歴のキャッシュ:履歴の末尾に印を付けると、そこまでのやり取りがキャッシュ
+    // 対象になり、次の往復では「前回までの分」がキャッシュ読み取り(通常の1割)になる。
+    // 往復が進むほど履歴が伸びる構造のため、長い会話ほど効く。
+    // 印は1つだけ付ける(system・toolsと合わせて3つ。上限4つ以内)。
+    if (Array.isArray(anthropicRequest.messages) && anthropicRequest.messages.length > 0) {
+      const msgs = anthropicRequest.messages.map((m) => ({ ...m }));
+      const last = msgs[msgs.length - 1];
+      if (typeof last.content === "string" && last.content.length > 0) {
+        last.content = [{ type: "text", text: last.content, cache_control: { type: "ephemeral" } }];
+      } else if (Array.isArray(last.content) && last.content.length > 0) {
+        last.content = last.content.map((b, i) =>
+          i === last.content.length - 1 ? { ...b, cache_control: { type: "ephemeral" } } : b
+        );
+      }
+      anthropicRequest.messages = msgs;
+    }
+
     // zoe-chat(Zoe001)・zoe-production(顧客の本番チャット)はブラックリスト判定対象のため、
     // track_topic_relevanceツールの呼び出しをここでサーバー側だけで処理し、フロントには見せない
     if (requestBody.mode === "zoe-chat" || requestBody.mode === "zoe-production") {
@@ -1537,6 +1571,7 @@ module.exports = async (req, res) => {
       signal: AbortSignal.timeout(300000), // 5分。web_search/code_execution等で時間がかかる場合の保険として長めに設定
     });
     const data = await response.json();
+    logUsage(requestBody.mode || "other", data);
     res.status(response.status).json(data); return;
   } catch (err) {
     res.status(500).json({ error: "プロキシ内部でエラーが発生しました: " + err.message }); return;
