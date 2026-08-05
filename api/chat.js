@@ -154,6 +154,23 @@ async function recordTopicRelevance(ip, relevant, botConfigId, customerId) {
 // 処理する(recordTopicRelevanceを実行)。以前はこの判定だけのために追加でもう1往復
 // 呼び出す設計だったが、判定はテキスト応答や他のツール呼び出しと同じ応答内で同時に
 // 行わせる形に変更したため、追加の呼び出しは不要になった(1回の呼び出しで完結する)。
+// 会話履歴の末尾に cache_control を付けた配列を返す(元の配列は書き換えない)。
+// これにより、そこまでのやり取りがキャッシュ対象になる。
+function withHistoryCache(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return messages;
+  const msgs = messages.map((m) => ({ ...m }));
+  const last = msgs[msgs.length - 1];
+  if (typeof last.content === "string" && last.content.length > 0) {
+    last.content = [{ type: "text", text: last.content, cache_control: { type: "ephemeral" } }];
+  } else if (Array.isArray(last.content) && last.content.length > 0) {
+    const lastIndex = last.content.length - 1;
+    last.content = last.content.map((b, i) =>
+      i === lastIndex ? { ...b, cache_control: { type: "ephemeral" } } : b
+    );
+  }
+  return msgs;
+}
+
 // APIの応答に元々含まれている使用量(トークン実数)を、Vercelのログに出すだけの関数。
 // 保存はしない。プロンプトキャッシュが実際に効いているか(cache_readに数字が入るか)と、
 // 1往復あたりの実原価を確認するためだけに使う。追加のAPI呼び出しは発生しない。
@@ -1284,6 +1301,26 @@ async function runSecretaryAgent(messages, requesterIp) {
   }
   const systemPromptWithMemory = SECRETARY_SYSTEM_PROMPT + `\n\n# 現在保存されている記憶(メモ)一覧\n${memoryListingText}`;
 
+  // プロンプトキャッシュ:秘書Zoeはツールを使うたびにAPIへの往復が発生し、そのたびに
+  // システムプロンプト(記憶一覧を含む)とツール定義を丸ごと送り直す構造になっている。
+  // ここに印を付けておくと、2ラウンド目以降は同じ部分がキャッシュ読み取り(通常の1割)に
+  // なる。中身は1回のやり取りの中で変わらないので、ループの外で1度だけ組み立てる。
+  const systemForApi = [
+    { type: "text", text: systemPromptWithMemory, cache_control: { type: "ephemeral" } },
+  ];
+  const secretaryToolsForApi = (() => {
+    const list = [
+      ...SECRETARY_TOOLS,
+      { type: "web_search_20260209", name: "web_search" },
+      { type: "web_fetch_20260209", name: "web_fetch" },
+      { type: "code_execution_20260120", name: "code_execution" },
+    ];
+    const lastIndex = list.length - 1;
+    return list.map((tool, i) =>
+      i === lastIndex ? { ...tool, cache_control: { type: "ephemeral" } } : tool
+    );
+  })();
+
   for (let i = 0; i < 20; i++) { // 無限ループ防止のため上限を設ける
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -1296,14 +1333,11 @@ async function runSecretaryAgent(messages, requesterIp) {
       body: JSON.stringify({
         model: "claude-sonnet-5",
         max_tokens: 60000,
-        system: systemPromptWithMemory,
-        messages: currentMessages,
-        tools: [
-          ...SECRETARY_TOOLS,
-          { type: "web_search_20260209", name: "web_search" },
-          { type: "web_fetch_20260209", name: "web_fetch" },
-          { type: "code_execution_20260120", name: "code_execution" },
-        ],
+        system: systemForApi,
+        // 会話履歴の末尾にも印を付ける。ラウンドが進むほど履歴が伸びるため、
+        // 前のラウンドまでの分がキャッシュ読み取りになり、新しく増えた分だけが通常単価になる
+        messages: withHistoryCache(currentMessages),
+        tools: secretaryToolsForApi,
       }),
     });
     const data = await response.json();
@@ -1539,18 +1573,7 @@ module.exports = async (req, res) => {
     // 対象になり、次の往復では「前回までの分」がキャッシュ読み取り(通常の1割)になる。
     // 往復が進むほど履歴が伸びる構造のため、長い会話ほど効く。
     // 印は1つだけ付ける(system・toolsと合わせて3つ。上限4つ以内)。
-    if (Array.isArray(anthropicRequest.messages) && anthropicRequest.messages.length > 0) {
-      const msgs = anthropicRequest.messages.map((m) => ({ ...m }));
-      const last = msgs[msgs.length - 1];
-      if (typeof last.content === "string" && last.content.length > 0) {
-        last.content = [{ type: "text", text: last.content, cache_control: { type: "ephemeral" } }];
-      } else if (Array.isArray(last.content) && last.content.length > 0) {
-        last.content = last.content.map((b, i) =>
-          i === last.content.length - 1 ? { ...b, cache_control: { type: "ephemeral" } } : b
-        );
-      }
-      anthropicRequest.messages = msgs;
-    }
+    anthropicRequest.messages = withHistoryCache(anthropicRequest.messages);
 
     // zoe-chat(Zoe001)・zoe-production(顧客の本番チャット)はブラックリスト判定対象のため、
     // track_topic_relevanceツールの呼び出しをここでサーバー側だけで処理し、フロントには見せない
